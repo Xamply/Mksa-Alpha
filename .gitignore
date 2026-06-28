@@ -1,0 +1,34 @@
+# === Instancias de Minecraft (entornos de prueba, regenerables) ===
+/Instancia 1/
+/Instancia 2/
+/Instancia 3/
+
+# === Claude local settings ===
+.claude/settings.local.json
+
+# === Logs de runtime (regenerados en cada ejecución) ===
+tier1-*.log
+/tier1.log
+
+# === agent/ (Java) — artefactos de build ===
+agent/dist/
+agent/out/
+agent/out-bridge/
+agent/out-ledger/
+agent/tmp-build/
+agent/tmp-compile/
+
+# === mod-thin/ (Java) — artefactos de build ===
+mod-thin/dist/
+mod-thin/out/
+mod-thin/out-tools/
+
+# === launcher/ (Tauri: Svelte + Rust) ===
+launcher/node_modules/
+launcher/dist/
+launcher/src-tauri/target/
+
+# === misc ===
+*.tmp
+.DS_Store
+Thumbs.db

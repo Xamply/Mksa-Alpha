@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "mksa_thin",
+  "version": "0.1.0",
+  "name": "MKSA Thin",
+  "description": "UI in-game del agente MKSA: boton Dogito en el menu de pausa + panel de mods con Desactivar/Restaurar (Tier 1 in-process).",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.mksa.modthin.ModThinClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16",
+    "fabric-api": "*",
+    "minecraft": "~1.21.11"
+  }
+}

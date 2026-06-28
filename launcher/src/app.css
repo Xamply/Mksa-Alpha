@@ -1,0 +1,37 @@
+:root {
+  --bg: #1a1a2e;
+  --bg-card: #23233c;
+  --bg-card-hover: #2a2a48;
+  --fg: #e8e8f0;
+  --fg-dim: #9a9ab0;
+  --accent: #4ecca3;
+  --accent-dim: #2e8a6e;
+  --danger: #e05f5f;
+  --border: #343452;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  user-select: none;
+}
+
+#app {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+}

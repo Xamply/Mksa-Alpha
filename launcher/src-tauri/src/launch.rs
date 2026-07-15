@@ -34,7 +34,12 @@ pub struct RunningGame {
 
 pub type Games = Arc<Mutex<HashMap<String, RunningGame>>>;
 
-pub fn emit_game<R: Runtime>(app: &AppHandle<R>, instance: &str, kind: &str, extra: &[(&str, String)]) {
+pub fn emit_game<R: Runtime>(
+    app: &AppHandle<R>,
+    instance: &str,
+    kind: &str,
+    extra: &[(&str, String)],
+) {
     let mut payload = serde_json::json!({ "instance": instance, "kind": kind });
     for (k, v) in extra {
         payload[k] = serde_json::Value::String(v.clone());
@@ -42,7 +47,11 @@ pub fn emit_game<R: Runtime>(app: &AppHandle<R>, instance: &str, kind: &str, ext
     let _ = app.emit("mksa://game", payload);
 }
 
-pub fn launch<R: Runtime>(app: AppHandle<R>, games: Games, instance_path: String) -> Result<LaunchResult, String> {
+pub fn launch<R: Runtime>(
+    app: AppHandle<R>,
+    games: Games,
+    instance_path: String,
+) -> Result<LaunchResult, String> {
     let inst = instances::read_instance(Path::new(&instance_path))
         .ok_or("la carpeta ya no parece una instancia")?;
     let mksa_dir = instances::mksa_dir(&instance_path);
@@ -50,7 +59,10 @@ pub fn launch<R: Runtime>(app: AppHandle<R>, games: Games, instance_path: String
 
     // §1.5 paso 1-3: ¿ya está corriendo?
     if let Some(pid) = live_game_pid(&mksa_dir) {
-        return Ok(LaunchResult { already_running: true, pid });
+        return Ok(LaunchResult {
+            already_running: true,
+            pid,
+        });
     }
 
     // §1.5 paso 4: ventana ciega.
@@ -75,13 +87,28 @@ fn launch_inner<R: Runtime>(
         // solo informamos uno de cada 25 para no inundar la UI.
         let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if n % 25 == 0 {
-            emit_game(app, &instance_path, "spawning", &[("detail", msg.to_string())]);
+            emit_game(
+                app,
+                &instance_path,
+                "spawning",
+                &[("detail", msg.to_string())],
+            );
         }
     })?;
 
-    emit_game(app, &instance_path, "spawning", &[("detail", "resolviendo JVM".into())]);
+    emit_game(
+        app,
+        &instance_path,
+        "spawning",
+        &[("detail", "resolviendo JVM".into())],
+    );
     let java = jvm::resolve(inst.java_path.as_deref(), &resolved.java_majors, &|msg| {
-        emit_game(app, &instance_path, "spawning", &[("detail", msg.to_string())]);
+        emit_game(
+            app,
+            &instance_path,
+            "spawning",
+            &[("detail", msg.to_string())],
+        );
     })?;
 
     let agent_jar = find_agent_jar()?;
@@ -100,16 +127,41 @@ fn launch_inner<R: Runtime>(
 
     let mut cmd = Command::new(&java.launch_exe);
     cmd.arg(format!("-Xms{}m", inst.min_mem_mb))
-        .arg(format!("-Xmx{}m", inst.max_mem_mb))
-        .arg(format!("-javaagent:{}", agent_jar.to_string_lossy()))
+        .arg(format!("-Xmx{}m", inst.max_mem_mb));
+    // Fase 9: JBR21 es la JVM dedicada de MKSA (jvm::resolve() la fuerza para
+    // todo lanzamiento real que requiera Java 21). La flag es inerte hasta
+    // que algo llame redefineClasses con cambio de forma -- se agrega siempre
+    // que la JVM resuelta sea realmente JBR (nunca por heurística de
+    // versión: `is_jbr` solo es true cuando vino de `jvm::ensure_jbr()`, así
+    // que una JVM estándar jamás recibe una flag que no reconoce).
+    if java.is_jbr {
+        cmd.arg("-XX:+AllowEnhancedClassRedefinition");
+    }
+    // Fase 8: flags JVM extra inyectados solo por el harness de verificación.
+    // La ruta de producción no define esta variable.
+    if let Ok(extra) = std::env::var("MKSA_EXTRA_JVM_ARGS") {
+        for arg in extra.split_whitespace() {
+            cmd.arg(arg);
+        }
+    }
+    cmd.arg(format!("-javaagent:{}", agent_jar.to_string_lossy()))
         .arg(format!("-Dmksa.token={token}"))
         .arg(format!("-Dmksa.dir={}", mksa_dir.to_string_lossy()))
         .arg("-Dminecraft.launcher.brand=MKSA");
     if let Some(fw) = &resolved.forgewrapper {
-        cmd.arg(format!("-Dforgewrapper.librariesDir={}", fw.libraries_dir.to_string_lossy()))
-            .arg(format!("-Dforgewrapper.installer={}", fw.installer.to_string_lossy()));
+        cmd.arg(format!(
+            "-Dforgewrapper.librariesDir={}",
+            fw.libraries_dir.to_string_lossy()
+        ))
+        .arg(format!(
+            "-Dforgewrapper.installer={}",
+            fw.installer.to_string_lossy()
+        ));
         if let Some(client) = &resolved.client_jar {
-            cmd.arg(format!("-Dforgewrapper.minecraft={}", client.to_string_lossy()));
+            cmd.arg(format!(
+                "-Dforgewrapper.minecraft={}",
+                client.to_string_lossy()
+            ));
         }
     }
     cmd.arg("-cp")
@@ -120,16 +172,29 @@ fn launch_inner<R: Runtime>(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    emit_game(app, &instance_path, "spawning", &[(
-        "detail",
-        format!("lanzando Minecraft {} (Java {})", resolved.mc_version, java.major),
-    )]);
-    let child = cmd.spawn().map_err(|e| format!("no se pudo lanzar la JVM: {e}"))?;
+    emit_game(
+        app,
+        &instance_path,
+        "spawning",
+        &[(
+            "detail",
+            format!(
+                "lanzando Minecraft {} (Java {})",
+                resolved.mc_version, java.major
+            ),
+        )],
+    );
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("no se pudo lanzar la JVM: {e}"))?;
     let pid = child.id();
 
     games.lock().unwrap().insert(
         instance_path.clone(),
-        RunningGame { pid, token: token.clone() },
+        RunningGame {
+            pid,
+            token: token.clone(),
+        },
     );
 
     // Supervisor: espera agent.json, conecta IPC, reenvía eventos a la UI.
@@ -140,7 +205,10 @@ fn launch_inner<R: Runtime>(
         ipc::supervise(app2, games2, instance_path, mksa2, token, child);
     });
 
-    Ok(LaunchResult { already_running: false, pid })
+    Ok(LaunchResult {
+        already_running: false,
+        pid,
+    })
 }
 
 /// Fase 3, corte 1 — relaunch con un mod desactivado.
@@ -170,7 +238,12 @@ pub fn relaunch_disable<R: Runtime>(
     // 1. Cerrar el juego vivo: guarda el mundo y libera el session.lock. Sin esto,
     //    el proceso nuevo no podría abrir el mundo (un solo escritor en SP).
     if let Some(pid) = live_game_pid(&mksa_dir) {
-        emit_game(&app, &instance_path, "relaunch", &[("detail", "cerrando el juego actual".into())]);
+        emit_game(
+            &app,
+            &instance_path,
+            "relaunch",
+            &[("detail", "cerrando el juego actual".into())],
+        );
         close_game_gracefully(pid);
     }
     // Restos del proceso viejo: el shutdown hook del agente borra agent.json, pero
@@ -181,8 +254,12 @@ pub fn relaunch_disable<R: Runtime>(
 
     // 2. Excluir los jars del modset nuevo (reversible).
     let moved = stage_out_mods(&mksa_dir, &disable_jars)?;
-    emit_game(&app, &instance_path, "relaunch",
-        &[("detail", format!("{} mod(s) desactivado(s)", moved.len()))]);
+    emit_game(
+        &app,
+        &instance_path,
+        "relaunch",
+        &[("detail", format!("{} mod(s) desactivado(s)", moved.len()))],
+    );
 
     // 3. Lanzar el proceso nuevo sobre el MISMO mundo, saltando el guard de
     //    instancia única (§1.5): un relaunch es la única excepción legítima a
@@ -207,7 +284,8 @@ pub fn stage_out_mods(mksa_dir: &Path, jars: &[String]) -> Result<Vec<(PathBuf, 
             .file_name()
             .ok_or_else(|| format!("jar sin nombre: {}", src.display()))?;
         let dst = disabled.join(name);
-        fs::rename(&src, &dst).map_err(|e| format!("no se pudo desactivar {}: {e}", src.display()))?;
+        fs::rename(&src, &dst)
+            .map_err(|e| format!("no se pudo desactivar {}: {e}", src.display()))?;
         moved.push((src, dst));
     }
     if moved.is_empty() {
@@ -253,7 +331,9 @@ pub fn close_game_gracefully(pid: u32) {
 
 #[cfg(not(windows))]
 pub fn close_game_gracefully(pid: u32) {
-    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         if !pid_alive(pid) {
@@ -261,7 +341,9 @@ pub fn close_game_gracefully(pid: u32) {
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
 }
 
 /// §1.5: la verdad de "¿está corriendo?" es pid vivo + puerto que responde,
@@ -349,7 +431,11 @@ fn offline_uuid(player: &str) -> String {
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!(
         "{}-{}-{}-{}-{}",
-        &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
     )
 }
 
@@ -376,7 +462,10 @@ fn find_agent_jar() -> Result<PathBuf, String> {
         }
         dir = d.parent();
     }
-    Err("No se encontró fable-agent.jar (compila agent/ con build.sh o define MKSA_AGENT_JAR).".into())
+    Err(
+        "No se encontró fable-agent.jar (compila agent/ con build.sh o define MKSA_AGENT_JAR)."
+            .into(),
+    )
 }
 
 fn random_token() -> String {

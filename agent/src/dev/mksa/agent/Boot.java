@@ -27,6 +27,13 @@ final class Boot implements Runnable {
     static volatile Map<String, List<java.nio.file.Path>> modRoots = Collections.emptyMap();
     /** Instancia viva del cliente (Minecraft/class_310), para el motor in-process (§3.5). */
     static volatile Object clientInstance;
+    /**
+     * T3 corte M (Pilar 3, universo estructural): salida de
+     * Tier3MixinAudit.buildStructuralUniverse, computada una sola vez en boot
+     * (mismo punto que computeTier3WatchSet). Solo diagnostico -- no hay aplicador
+     * ni guard de comportamiento leyendo esto todavia.
+     */
+    static volatile Map<String, Object> tier3StructuralUniverse = Collections.emptyMap();
 
     /** clase marcadora → loader. El impl del loader carga mucho antes que el juego. */
     private static final String[][] MARKERS = {
@@ -67,6 +74,20 @@ final class Boot implements Runnable {
             // lee el cache en cada llamada, así los iconos aparecen en la UI a
             // medida que la descarga termina (con auto-refresh del panel).
             ModIconStore.log("BOOT-DONE " + ModIconStore.stats());
+            // T3 corte I: watch-set global para Tier3LiveCapture -- aqui porque
+            // mods/modRoots/tier YA estan listos (recien enumerados arriba) y el
+            // juego todavia no cargo la inmensa mayoria de sus clases
+            // (waitForGameInstance sigue mas abajo). Solo mods tier>=3, reusando
+            // el mismo escaneo de mixins que t3.mixinPlan (Tier3MixinAudit.scanTargets)
+            // -- cero divergencia de parseo entre el watch-set y la auditoria on-demand.
+            computeTier3WatchSet();
+            // T3 corte M: universo estructural global -- SOLO "que forma hace falta",
+            // no "como se aplica" (sin IMixinConfigPlugin, sin preApply, sin mixin
+            // dummy). Mismo punto que computeTier3WatchSet porque no depende del
+            // timing de carga del juego (a diferencia de Tier3LiveCapture, es
+            // analisis estatico puro de bytecode ya leido del disco); se calcula aqui
+            // por consistencia con el resto del boot, no por necesidad de carrera.
+            computeTier3StructuralUniverse();
             // Época del ledger (inc.5 Paso 2): hash estable del modset, ya conocido
             // tras la enumeración. Los writes de chunk ocurren mucho después (carga
             // del mundo), así que la época será real al estamparse en mksa:prov.
@@ -115,12 +136,13 @@ final class Boot implements Runnable {
                 }
                 Thread.sleep(2000);
             }
-            if (built && stable >= 2) {
-                Wcg.ready = true;
-                Agent.stage("registries-frozen", new LinkedHashMap<String, Object>());
-                Agent.stage("wcg-ready", Agent.map(
-                        "registries", Wcg.definitions.size(),
-                        "entries", Wcg.totalEntries));
+              if (built && stable >= 2) {
+                  Wcg.ready = true;
+                  ModSemantics.annotate(mods, Wcg.definitions);
+                  Agent.stage("registries-frozen", new LinkedHashMap<String, Object>());
+                  Agent.stage("wcg-ready", Agent.map(
+                          "registries", Wcg.definitions.size(),
+                          "entries", Wcg.totalEntries));
             } else {
                 // sin WCG el juego sigue siendo jugable; se informa y se continúa
                 Agent.bootFailed("wcg-ready", built
@@ -217,45 +239,51 @@ final class Boot implements Runnable {
             Map<String, List<java.nio.file.Path>> roots =
                     new LinkedHashMap<String, List<java.nio.file.Path>>();
             for (Object container : all) {
-                Object meta = call(container, "getMetadata");
-                String id = (String) call(meta, "getId");
-                Object ver = call(meta, "getVersion");
-                String version = ver == null ? null : (String) call(ver, "getFriendlyString");
-                String name = (String) call(meta, "getName");
-                List<String> deps = new ArrayList<String>();
                 try {
-                    Collection<?> dd = (Collection<?>) call(meta, "getDependencies");
-                    if (dd != null) {
-                        for (Object dep : dd) {
-                            Object kind = call(dep, "getKind");
-                            if (kind == null || "DEPENDS".equals(String.valueOf(kind))) {
-                                deps.add((String) call(dep, "getModId"));
+                    Object meta = call(container, "getMetadata");
+                    String id = (String) call(meta, "getId");
+                    Object ver = call(meta, "getVersion");
+                    String version = ver == null ? null : (String) call(ver, "getFriendlyString");
+                    String name = (String) call(meta, "getName");
+                    List<String> deps = new ArrayList<String>();
+                    try {
+                        Collection<?> dd = (Collection<?>) call(meta, "getDependencies");
+                        if (dd != null) {
+                            for (Object dep : dd) {
+                                Object kind = call(dep, "getKind");
+                                if (kind == null || "DEPENDS".equals(String.valueOf(kind))) {
+                                    deps.add((String) call(dep, "getModId"));
+                                }
                             }
                         }
+                    } catch (Throwable ignored) {
+                        // getKind no existe en loaders viejos; deps quedan vacías antes que mentir
                     }
-                } catch (Throwable ignored) {
-                    // getKind no existe en loaders viejos; deps quedan vacías antes que mentir
+                    if ("minecraft".equals(id)) mcVersion = version;
+                    if ("fabricloader".equals(id) || "quilt_loader".equals(id)) loaderVersion = version;
+                    List<java.nio.file.Path> modRootPaths = fabricRoots(container);
+                    Map<String, Object> m = Agent.map(
+                            "id", id, "version", version, "name", name);
+                    m.put("namespaces", Collections.singletonList(id));
+                    m.put("tier", Tier.classify(modRootPaths));
+                    m.put("deps", deps);
+                    m.put("files", fabricFiles(container));
+                    m.put("enabled", Boolean.TRUE);
+                    m.put("description", extractDescription(meta));
+                    if (resolveIcon(id, name)) iconsLoaded++;
+                    else iconsMissed++;
+                    out.add(m);
+                    if (id != null && !modRootPaths.isEmpty()) roots.put(id, modRootPaths);
+                } catch (Throwable t) {
+                    ModIconStore.log("ENUM-SKIP Fabric container -> "
+                            + t.getClass().getSimpleName() + ": " + t.getMessage());
                 }
-                if ("minecraft".equals(id)) mcVersion = version;
-                if ("fabricloader".equals(id) || "quilt_loader".equals(id)) loaderVersion = version;
-                List<java.nio.file.Path> modRootPaths = fabricRoots(container);
-                Map<String, Object> m = Agent.map(
-                        "id", id, "version", version, "name", name);
-                m.put("namespaces", Collections.singletonList(id));
-                m.put("tier", Tier.classify(modRootPaths));
-                m.put("deps", deps);
-                m.put("files", fabricFiles(container));
-                m.put("enabled", Boolean.TRUE);
-                m.put("description", extractDescription(meta));
-                if (resolveIcon(id, name)) iconsLoaded++;
-                else iconsMissed++;
-                out.add(m);
-                if (id != null && !modRootPaths.isEmpty()) roots.put(id, modRootPaths);
             }
             ModIconStore.log("ENUM Fabric: " + out.size() + " mods, " + iconsLoaded + " en cache, " + iconsMissed + " encolados");
             mods = out;
             modRoots = roots;
         } catch (Throwable t) {
+            ModIconStore.log("ENUM-FAIL Fabric -> " + t.getClass().getSimpleName() + ": " + t.getMessage());
             System.err.println("[mksa] enumeración de mods falló: " + t);
             t.printStackTrace();
         }
@@ -263,6 +291,51 @@ final class Boot implements Runnable {
 
     private int iconsLoaded;
     private int iconsMissed;
+
+    /**
+     * Une los targets @Mixin de todos los mods tier&gt;=3 en un solo watch-set y lo
+     * entrega a Tier3LiveCapture, para que su transformer pasivo capture el
+     * bytecode ya tejido por Mixin en la primera definicion real de cada target
+     * (corte I). Tolerante a fallo: sin watch-set, la captura viva simplemente
+     * queda vacia y el gate sigue reportando el blocker honestamente.
+     */
+    private void computeTier3WatchSet() {
+        try {
+            java.util.Set<String> all = new java.util.LinkedHashSet<String>();
+            for (Map<String, Object> mod : mods) {
+                Object tierObj = mod.get("tier");
+                if (!(tierObj instanceof Number) || ((Number) tierObj).intValue() < 3) continue;
+                Object idObj = mod.get("id");
+                if (!(idObj instanceof String)) continue;
+                List<java.nio.file.Path> modRootPaths = modRoots.get(idObj);
+                if (modRootPaths == null || modRootPaths.isEmpty()) continue;
+                all.addAll(Tier3MixinAudit.scanTargets(modRootPaths));
+            }
+            if (!all.isEmpty()) {
+                Tier3LiveCapture.addTargets(all);
+            }
+            ModIconStore.log("T3-WATCHSET " + all.size() + " targets de " + mods.size() + " mods");
+        } catch (Throwable t) {
+            System.err.println("[mksa] tier3 watch-set global falló: " + t);
+        }
+    }
+
+    /**
+     * T3 corte M (Pilar 3, universo estructural -- SOLO diagnostico): computa una
+     * vez en boot la union de interfaces Accessor/Invoker de todos los mods
+     * tier&gt;=3, via el mismo escaneo de mixins que ya reusan computeTier3WatchSet
+     * y t3.mixinPlan. Tolerante a fallo: si falla, tier3StructuralUniverse queda
+     * en su default vacio y el diagnostico IPC lo reporta honestamente.
+     */
+    private void computeTier3StructuralUniverse() {
+        try {
+            Map<String, Object> universe = Tier3MixinAudit.buildStructuralUniverse(mods, modRoots);
+            tier3StructuralUniverse = universe;
+            ModIconStore.log("T3-STRUCTURAL-UNIVERSE calculado de " + mods.size() + " mods");
+        } catch (Throwable t) {
+            System.err.println("[mksa] tier3 universo estructural falló: " + t);
+        }
+    }
 
     /**
      * Enumera mods en Forge/NeoForge vía ModList. Los métodos se buscan en las

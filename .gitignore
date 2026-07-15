@@ -6,9 +6,19 @@
 # === Claude local settings ===
 .claude/settings.local.json
 
-# === Logs de runtime (regenerados en cada ejecución) ===
+# === Logs de runtime y humo (regenerados en cada ejecución) ===
 tier1-*.log
 /tier1.log
+tier3-*-smoke.txt
+launcher/src-tauri/tier3-*.txt
+launcher/src-tauri/tier3-*.log
+
+# === Carpetas temporales y de inspección de builds ===
+agent/out-bridge-check/
+agent/out-check/
+agent/out-inspect/
+mod-thin/out-check/
+launcher/src-tauri/tmp_chat_heads_inspect/
 
 # === agent/ (Java) — artefactos de build ===
 agent/dist/

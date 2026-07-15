@@ -30,10 +30,15 @@ pub fn supervise<R: Runtime>(
     let deadline = now_ms() + 120_000;
     let port = loop {
         if let Ok(Some(status)) = child.try_wait() {
-            emit_game(&app, &instance, "error", &[(
-                "detail",
-                format!("el juego terminó durante el arranque (código {status})"),
-            )]);
+            emit_game(
+                &app,
+                &instance,
+                "error",
+                &[(
+                    "detail",
+                    format!("el juego terminó durante el arranque (código {status})"),
+                )],
+            );
             cleanup(&games);
             return;
         }
@@ -45,10 +50,15 @@ pub fn supervise<R: Runtime>(
             }
         }
         if now_ms() > deadline {
-            emit_game(&app, &instance, "error", &[(
-                "detail",
-                "el agente no publicó su archivo de contacto en 120s".into(),
-            )]);
+            emit_game(
+                &app,
+                &instance,
+                "error",
+                &[(
+                    "detail",
+                    "el agente no publicó su archivo de contacto en 120s".into(),
+                )],
+            );
             cleanup(&games);
             return;
         }
@@ -65,10 +75,15 @@ pub fn supervise<R: Runtime>(
             if matches!(child.try_wait(), Ok(Some(_))) {
                 emit_game(&app, &instance, "closed", &[]);
             } else {
-                emit_game(&app, &instance, "error", &[(
-                    "detail",
-                    format!("IPC desconectado ({e}); el juego sigue corriendo"),
-                )]);
+                emit_game(
+                    &app,
+                    &instance,
+                    "error",
+                    &[(
+                        "detail",
+                        format!("IPC desconectado ({e}); el juego sigue corriendo"),
+                    )],
+                );
             }
         }
     }
@@ -105,7 +120,10 @@ fn connect_and_pump<R: Runtime>(
     let v: Value = serde_json::from_str(&first).map_err(|e| e.to_string())?;
     let ok = &v["ok"];
     if !ok.is_object() {
-        return Err(format!("hello rechazado: {}", v["err"]["code"].as_str().unwrap_or("?")));
+        return Err(format!(
+            "hello rechazado: {}",
+            v["err"]["code"].as_str().unwrap_or("?")
+        ));
     }
     let session = ok["session"].as_str().unwrap_or("?").to_string();
     emit_game(app, instance, "connected", &[("session", session)]);
@@ -160,10 +178,15 @@ fn handle_line<R: Runtime>(app: &AppHandle<R>, instance: &str, line: &str) {
             Some("boot.failed") => {
                 let stage = v["p"]["stage"].as_str().unwrap_or("?");
                 let error = v["p"]["error"].as_str().unwrap_or("?");
-                emit_game(app, instance, "error", &[(
-                    "detail",
-                    format!("arranque fallido en {stage}: {error}; el juego puede seguir vivo"),
-                )]);
+                emit_game(
+                    app,
+                    instance,
+                    "error",
+                    &[(
+                        "detail",
+                        format!("arranque fallido en {stage}: {error}; el juego puede seguir vivo"),
+                    )],
+                );
             }
             Some("shutdown") => {
                 // el bucle principal corta al ver shutdown

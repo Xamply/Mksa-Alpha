@@ -45,10 +45,7 @@ pub fn mksa_cache_root() -> PathBuf {
 }
 
 /// progreso: callback hacia la UI (etapa, detalle)
-pub fn resolve(
-    instance: &Instance,
-    progress: &dyn Fn(&str),
-) -> Result<ResolvedLaunch, String> {
+pub fn resolve(instance: &Instance, progress: &dyn Fn(&str)) -> Result<ResolvedLaunch, String> {
     if instance.components.is_empty() {
         return Err(
             "La instancia no tiene mmc-pack.json; el lanzamiento de instancias sin metadatos llegará más adelante."
@@ -137,7 +134,10 @@ pub fn resolve(
     let mut classpath: Vec<PathBuf> = Vec::new();
     for key in &key_order {
         let lib = &chosen[key];
-        progress(&format!("artefacto {}", lib["name"].as_str().unwrap_or_default()));
+        progress(&format!(
+            "artefacto {}",
+            lib["name"].as_str().unwrap_or_default()
+        ));
         classpath.push(locate_or_download(lib)?);
     }
     // El jar del cliente va al final del classpath.
@@ -173,10 +173,7 @@ pub fn resolve(
 /// classpath) y garantiza que todos cuelguen de UN único root de libraries,
 /// que es lo que ForgeWrapper recibe como `librariesDir`: se prefiere el root
 /// donde quedó el instalador y los descarriados se copian dentro.
-fn resolve_forgewrapper(
-    metas: &[Value],
-    progress: &dyn Fn(&str),
-) -> Result<ForgeWrapper, String> {
+fn resolve_forgewrapper(metas: &[Value], progress: &dyn Fn(&str)) -> Result<ForgeWrapper, String> {
     let mut installer: Option<PathBuf> = None;
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     for m in metas {
@@ -207,12 +204,18 @@ fn resolve_forgewrapper(
                     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
                 fs::copy(p, &dest).map_err(|e| {
-                    format!("no se pudo copiar {} al root de libraries: {e}", p.display())
+                    format!(
+                        "no se pudo copiar {} al root de libraries: {e}",
+                        p.display()
+                    )
                 })?;
             }
         }
     }
-    Ok(ForgeWrapper { installer, libraries_dir })
+    Ok(ForgeWrapper {
+        installer,
+        libraries_dir,
+    })
 }
 
 fn load_component_meta(uid: &str, version: &str) -> Result<Value, String> {
@@ -332,12 +335,17 @@ fn locate_or_download(lib: &Value) -> Result<PathBuf, String> {
     let (url, sha1) = if let Some(artifact) = lib["downloads"]["artifact"].as_object() {
         (
             artifact["url"].as_str().unwrap_or_default().to_string(),
-            artifact.get("sha1").and_then(|s| s.as_str()).map(String::from),
+            artifact
+                .get("sha1")
+                .and_then(|s| s.as_str())
+                .map(String::from),
         )
     } else if let Some(base) = lib["url"].as_str() {
         (format!("{}/{}", base.trim_end_matches('/'), rel), None)
     } else {
-        return Err(format!("{gav}: no está en disco y el meta no trae URL de descarga"));
+        return Err(format!(
+            "{gav}: no está en disco y el meta no trae URL de descarga"
+        ));
     };
     if url.is_empty() {
         return Err(format!("{gav}: URL de descarga vacía"));
@@ -353,7 +361,9 @@ fn locate_or_download(lib: &Value) -> Result<PathBuf, String> {
         h.update(&bytes);
         let got = h.digest().to_string();
         if got != expect {
-            return Err(format!("{gav}: sha1 no coincide (esperado {expect}, obtenido {got})"));
+            return Err(format!(
+                "{gav}: sha1 no coincide (esperado {expect}, obtenido {got})"
+            ));
         }
     }
     fs::write(&dest, &bytes).map_err(|e| e.to_string())?;

@@ -82,8 +82,16 @@ public final class TxJournal {
     // TxReceipt
     // ─────────────────────────────────────────────────────────────────────────
 
-    /** Veredicto agregado de una transacción. */
-    public enum Status { OK, PARTIAL, FAILED }
+    /** Veredicto agregado de una transacción. ROLLED_BACK (corte tier3 end-to-end
+     * §5): el redefine inicial tuvo exito pero la verificacion de schema post-
+     * redefine no calzo con los bytes que se pidio instalar -- se emitio un
+     * segundo redefineClasses con los bytes pre-mutacion y ESE segundo redefine
+     * tuvo exito, revirtiendo el cambio. Deliberadamente distinto de PARTIAL
+     * (que significa "se aplico pero con un detalle no verificado") y de FAILED
+     * (que significa "no se aplico nada"): ROLLED_BACK significa "se aplico,
+     * se detecto que estaba mal, y se revirtio con exito" -- nunca se debe
+     * confundir con exito silencioso. */
+    public enum Status { OK, PARTIAL, FAILED, ROLLED_BACK }
 
     /** Operación que produjo el receipt. */
     public enum Op { disable, enable }

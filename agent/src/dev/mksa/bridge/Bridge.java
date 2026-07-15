@@ -165,6 +165,53 @@ public final class Bridge {
         catch (Throwable t) { warnOnce("dpFilterTagBuild", t); }
     }
 
+    /** T2 corte 1: Fabric Event.register(listener) observado en vivo. */
+    public static void runtimeSubscribe(String api, Object busOrEvent, Object phase, Object listener) {
+        LedgerSink s = sink;
+        if (s == null) return;
+        try { s.onRuntimeSubscribe(api, busOrEvent, phase, listener); }
+        catch (Throwable t) { warnOnce("runtimeSubscribe", t); }
+    }
+
+    /**
+     * T3 corte K (Pilar 1b): inyectado a la ENTRADA de
+     * MixinInfo.createContextFor(TargetClassContext) por Tier3MixinOrderCapture.
+     * Recibe el target class name, el nombre del mixin (this.getName()) y su
+     * prioridad (this.getPriority()) en el orden real de aplicacion.
+     */
+    public static void onMixinApplyOrder(String targetClassName, String mixinName, int priority) {
+        LedgerSink s = sink;
+        if (s == null) return;
+        try { s.onMixinApplyOrder(targetClassName, mixinName, priority); }
+        catch (Throwable t) { warnOnce("onMixinApplyOrder", t); }
+    }
+
+    /**
+     * Corte tabs (Tier 1): inyectado a la ENTRADA de
+     * CreativeModeTab$ItemDisplayBuilder.accept(ItemStack, TabVisibility). Si
+     * devuelve {@code true}, la inyección hace {@code RETURN} inmediato — el item
+     * nunca se agrega al contenido de la pestaña. Hot path: sin sink o sin veto
+     * armado, el coste es una rama (la JIT la inlinea trivialmente).
+     */
+    public static boolean shouldVetoTabItem(Object itemStack) {
+        LedgerSink s = sink;
+        if (s == null) return false;
+        try { return s.shouldVetoTabItem(itemStack); }
+        catch (Throwable t) { warnOnce("shouldVetoTabItem", t); return false; }
+    }
+
+    /**
+     * Corte tabs (Tier 1), Paso A: inyectado a la ENTRADA de
+     * CreativeModeTab.buildContents(ItemDisplayParameters) — captura pasiva del
+     * último ItemDisplayParameters real visto.
+     */
+    public static void captureTabDisplayParams(Object params) {
+        LedgerSink s = sink;
+        if (s == null) return;
+        try { s.captureTabDisplayParams(params); }
+        catch (Throwable t) { warnOnce("captureTabDisplayParams", t); }
+    }
+
     /** Inyectado a la entrada de SerializableChunkData.parse(...): recibe el CompoundTag de disco. */
     public static void readChunkProv(Object compoundTag) {
         if (compoundTag == null) return;
@@ -228,7 +275,56 @@ public final class Bridge {
         catch (Throwable t) { warnOnce("modThinEpoch", t); return agentNotReady(); }
     }
 
+    public static String modThinDeps(String ns) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinDeps(ns); }
+        catch (Throwable t) { warnOnce("modThinDeps", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
+    public static String modThinCascadeTargets(String ns) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinCascadeTargets(ns); }
+        catch (Throwable t) { warnOnce("modThinCascadeTargets", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
+    public static String modThinDisableGroup(String nsCsv) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinDisableGroup(nsCsv); }
+        catch (Throwable t) { warnOnce("modThinDisableGroup", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
     // ---- reflexión estructural sobre CompoundTag ----
+
+    public static String modThinPlan(String ns) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinPlan(ns); }
+        catch (Throwable t) { warnOnce("modThinPlan", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
+    public static String modThinT3MixinPlan(String ns) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinT3MixinPlan(ns); }
+        catch (Throwable t) { warnOnce("modThinT3MixinPlan", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
+    public static String modThinT3StructuralUniverse() {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinT3StructuralUniverse(); }
+        catch (Throwable t) { warnOnce("modThinT3StructuralUniverse", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
+
+    public static String modThinInventoryRegression(String victimNs, String vanillaItemId, String victimItemId) {
+        LedgerSink s = sink;
+        if (s == null) return agentNotReady();
+        try { return s.modThinInventoryRegression(victimNs, vanillaItemId, victimItemId); }
+        catch (Throwable t) { warnOnce("modThinInventoryRegression", t); return "{\"ok\":false,\"error\":\"" + t.getClass().getSimpleName() + "\"}"; }
+    }
 
     private static void init(Class<?> compound) throws Exception {
         if (inited) return;

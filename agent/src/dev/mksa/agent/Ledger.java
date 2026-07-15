@@ -13,6 +13,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -27,12 +28,15 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -119,6 +123,70 @@ public final class Ledger implements LedgerSink {
     public long vetoHitsCount() { return vetoHits.get(); }
     public long vetoPassthroughCount() { return vetoPassthrough.get(); }
 
+    // ---- cascade disable: dependencias huerfanas apagadas junto a un mod ----
+    // ns raiz -> lista de ns que se apagaron SOLO por quedar huerfanos de esa raiz
+    // (orden de descubrimiento). Se consume y limpia en modThinEnable cuando la
+    // raiz se reactiva, restaurando el companero automaticamente (simetria).
+    private final Map<String, List<String>> cascadeGroupMembers = new ConcurrentHashMap<String, List<String>>();
+
+    // ---- corte tabs: toggle de pestaña de inventario creativo ----
+    // armedTabVeto contiene los namespaces cuyos items NO deben poblar ninguna
+    // pestaña de inventario creativo mientras esté armado. Mismo patrón volatile +
+    // replace-on-update que armedBlockVeto. El veto corre en
+    // CreativeModeTab$ItemDisplayBuilder.accept (class_1761$class_7703.method_45417),
+    // el único punto por el que pasa CUALQUIER item de CUALQUIER mod al entrar a
+    // CUALQUIER pestaña — vaciar así el contenido basta para que vainilla oculte el
+    // botón (shouldDisplay()→hasStacks()), sin tocar Registries.ITEM_GROUP ni la GUI.
+    private volatile Set<String> armedTabVeto = Collections.emptySet();
+    private final AtomicLong tabVetoHits = new AtomicLong();
+    private final AtomicLong tabVetoPassthrough = new AtomicLong();
+    public Set<String> armedTabVeto() { return armedTabVeto; }
+    public long tabVetoHitsCount() { return tabVetoHits.get(); }
+    public long tabVetoPassthroughCount() { return tabVetoPassthrough.get(); }
+
+    // Índice de items modded: item (singleton) → namespace, solo ns≠minecraft. Mismo
+    // patrón que blockIndex, pero resuelto LAZY (no hay un hook "wcg-ready" dedicado
+    // a items) en la primera llamada a shouldVetoTabItem, vía Wcg.liveRegistry.
+    private volatile Map<Object, String> itemIndex;
+    private volatile Object itemRegistry;        // Registry<Item> vivo
+    private volatile Method itemGetId;            // getId(Item): Identifier
+    private volatile Method getItemMethod;        // ItemStack.getItem(): Item
+    private volatile boolean getItemFailed;
+
+    // Último ItemDisplayParameters observado (Paso A) por el hook pasivo de
+    // CreativeModeTab.buildContents, para poder forzar un rebuild reflectivo de
+    // cualquier pestaña sin construir el objeto sintéticamente. Latest-wins: cada
+    // llamada sobreescribe, siempre el contexto (permisos/feature flags/holder
+    // lookup) más fresco visto en esta sesión.
+    private volatile Object lastItemDisplayParams;
+    // ItemGroups.updateEntries(ItemDisplayParameters): void — orquestador vanilla
+    // real de "reconstruir todas las pestañas". A diferencia del extinto
+    // buildContentsMethod (por-pestaña), invocar ESTE método dispara también, como
+    // efecto colateral, el repaginado de Fabric (CreativeModeTabsMixin.paginateGroups,
+    // inyectado en su HEAD) que cierra el hueco dejado por una pestaña oculta.
+    private volatile Class<?> itemGroupsClass;
+    private volatile Method updateEntriesMethod;
+    private volatile boolean updateEntriesFailed;
+
+    // Diagnóstico corte tabs: contadores para distinguir, sin adivinar, en qué
+    // eslabón de la cadena captura→rebuild se rompe (hook nunca disparó vs.
+    // disparó pero el registro de pestañas no se encontró vs. se encontró pero
+    // buildContents no se pudo resolver/invocar).
+    private final AtomicLong tabParamsCapturedCount = new AtomicLong();
+    private final AtomicLong tabRebuildCalls = new AtomicLong();
+    private final AtomicLong tabRebuildTabsSeen = new AtomicLong();
+    private final AtomicLong tabRebuildInvoked = new AtomicLong();
+    private final AtomicLong tabRebuildInvokeErrors = new AtomicLong();
+    private volatile String tabRebuildLastSkipReason = null;
+    private volatile String tabRebuildLastError = null;
+    public long tabParamsCapturedCount() { return tabParamsCapturedCount.get(); }
+    public long tabRebuildCallsCount() { return tabRebuildCalls.get(); }
+    public long tabRebuildTabsSeenCount() { return tabRebuildTabsSeen.get(); }
+    public long tabRebuildInvokedCount() { return tabRebuildInvoked.get(); }
+    public long tabRebuildInvokeErrorsCount() { return tabRebuildInvokeErrors.get(); }
+    public String tabRebuildLastSkipReason() { return tabRebuildLastSkipReason; }
+    public String tabRebuildLastError() { return tabRebuildLastError; }
+
     // Índice de bloques modded: bloque (singleton) → namespace, solo ns≠minecraft.
     // Da en O(1) "¿es modded el contenido?" y su namespace. Publicado vía volatile
     // tras construirse entero (lectura sin más escrituras → segura sin sincronizar).
@@ -147,6 +215,64 @@ public final class Ledger implements LedgerSink {
     private Object stackWalker;
     private Method walkMethod;
     private Method frameGetDeclaringClass;
+
+    // ---- Plano B runtime (Tier 2 corte 1) ----
+    // Reconstruible por arranque y nunca persistido. Guarda referencias vivas a
+    // listeners para que el siguiente corte pueda desuscribir; el reporte IPC solo
+    // expone resumen y muestras acotadas.
+    private final ConcurrentHashMap<String, RuntimeBucket> runtimeBuckets =
+            new ConcurrentHashMap<String, RuntimeBucket>();
+    private final AtomicLong runtimeSubscribeCalls = new AtomicLong();
+    private final AtomicLong runtimeSubscribeAttributed = new AtomicLong();
+    private final AtomicLong runtimeSubscribeUnknown = new AtomicLong();
+
+    private final ThreadLocal<Boolean> suppressRuntimeCapture = new ThreadLocal<Boolean>();
+    private final AtomicLong runtimeDisabledRefs = new AtomicLong();
+
+    // T3 corte K (Pilar 1b): secuencia real de aplicacion de mixins por target,
+    // capturada por el hook de Tier3MixinOrderCapture en MixinInfo.createContextFor.
+    // APPEND (no idempotente): a diferencia de Tier3LiveCapture (solo primera
+    // definicion), aqui necesitamos la secuencia COMPLETA de invocaciones.
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<MixinOrderEntry>> mixinOrderByTarget =
+            new ConcurrentHashMap<String, CopyOnWriteArrayList<MixinOrderEntry>>();
+
+    static final class MixinOrderEntry {
+        final String mixin;
+        final int priority;
+        MixinOrderEntry(String mixin, int priority) {
+            this.mixin = mixin;
+            this.priority = priority;
+        }
+    }
+
+    private static final class RuntimeRef {
+        final String api;
+        final String owner;
+        final Object event;
+        final Object phase;
+        final Object listener;
+        volatile boolean disabled;
+        RuntimeRef(String api, String owner, Object event, Object phase, Object listener) {
+            this.api = api;
+            this.owner = owner;
+            this.event = event;
+            this.phase = phase;
+            this.listener = listener;
+        }
+    }
+
+    private static final class RuntimeBucket {
+        final String api;
+        final String owner;
+        final List<RuntimeRef> refs = Collections.synchronizedList(new ArrayList<RuntimeRef>());
+        final AtomicLong total = new AtomicLong();
+        volatile String sampleClass;
+        volatile String sampleEvent;
+        RuntimeBucket(String api, String owner) {
+            this.api = api;
+            this.owner = owner;
+        }
+    }
 
     // ---- reflexión NBT de escritura (construcción del prov) ----
     private volatile Constructor<?> compoundCtor;
@@ -465,6 +591,253 @@ public final class Ledger implements LedgerSink {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    // ====================== corte tabs: veto de pestaña de inventario creativo ======================
+
+    /**
+     * Arma el veto de pestaña de inventario creativo para los namespaces dados.
+     * Mientras esté armado, {@code CreativeModeTab$ItemDisplayBuilder.accept}
+     * corto-circuita con {@code RETURN} inmediato para cualquier {@code ItemStack}
+     * cuyo namespace esté en el set — el item nunca se agrega a
+     * {@code tabContents}/{@code searchTabContents} de ninguna pestaña. Idempotente:
+     * reemplaza, no compone. Pasar set vacío equivale a {@link #disarmTabVeto()}.
+     */
+    public synchronized Map<String, Object> armTabVeto(Set<String> namespaces) {
+        Set<String> next = (namespaces == null || namespaces.isEmpty())
+                ? Collections.<String>emptySet()
+                : Collections.unmodifiableSet(new HashSet<String>(namespaces));
+        armedTabVeto = next;
+        Map<String, Object> r = new HashMap<String, Object>();
+        r.put("armed", Boolean.TRUE);
+        r.put("count", (long) next.size());
+        r.put("namespaces", new ArrayList<String>(next));
+        return r;
+    }
+
+    /** Desarma el veto de pestaña. Idempotente. */
+    public synchronized Map<String, Object> disarmTabVeto() {
+        armedTabVeto = Collections.<String>emptySet();
+        Map<String, Object> r = new HashMap<String, Object>();
+        r.put("disarmed", Boolean.TRUE);
+        return r;
+    }
+
+    /**
+     * Invocado por el bytecode inyectado a la ENTRADA de
+     * {@code CreativeModeTab$ItemDisplayBuilder.accept(ItemStack, TabVisibility)}.
+     * Si devuelve {@code true}, la inyección hace {@code RETURN} inmediato: el
+     * ItemStack nunca se agrega al contenido de la pestaña. Hot path: cuando no hay
+     * veto armado, el coste es un volatile read + {@link Set#isEmpty()}. Falla
+     * cerrado: cualquier excepción devuelve {@code false}.
+     */
+    @Override
+    public boolean shouldVetoTabItem(Object itemStack) {
+        Set<String> v = armedTabVeto;
+        if (v.isEmpty() || itemStack == null) return false;
+        try {
+            String ns = namespaceOfItemStack(itemStack);
+            if (ns != null && v.contains(ns)) {
+                tabVetoHits.incrementAndGet();
+                return true;
+            }
+            tabVetoPassthrough.incrementAndGet();
+            return false;
+        } catch (Throwable t) {
+            warnOnce("shouldVetoTabItem: " + t);
+            return false;
+        }
+    }
+
+    /** Namespace del item de un ItemStack, mismo patrón que {@link #namespaceOf(Object)}. */
+    private String namespaceOfItemStack(Object itemStack) {
+        Map<Object, String> idx = ensureItemIndex();
+        if (idx == null) return null;
+        Object item = itemOf(itemStack);
+        if (item == null) return null;
+        String ns = idx.get(item);
+        return ns != null ? ns : "minecraft";
+    }
+
+    /** Construye (lazy, una vez) el índice item→namespace desde el registro vivo. */
+    private Map<Object, String> ensureItemIndex() {
+        Map<Object, String> idx = itemIndex;
+        if (idx != null) return idx;
+        synchronized (this) {
+            idx = itemIndex;
+            if (idx != null) return idx;
+            try {
+                Instrumentation inst = Agent.instrumentation;
+                if (inst == null) return null;
+                Object[] reg = Wcg.liveRegistry(inst, "minecraft:item");
+                if (reg == null) return null;
+                Object registry = reg[0];
+                Method getId = (Method) reg[1];
+                IdentityHashMap<Object, String> built = new IdentityHashMap<Object, String>();
+                for (Object item : (Iterable<?>) registry) {
+                    Object idObj;
+                    try { idObj = getId.invoke(registry, item); } catch (Throwable t) { continue; }
+                    if (idObj == null) continue;
+                    String id = idObj.toString();
+                    int colon = id.indexOf(':');
+                    if (colon < 0) continue;
+                    String ns = id.substring(0, colon);
+                    if (!"minecraft".equals(ns)) built.put(item, ns);
+                }
+                itemRegistry = registry;
+                itemGetId = getId;
+                itemIndex = built;
+                return built;
+            } catch (Throwable t) {
+                warnOnce("ensureItemIndex: " + t);
+                return null;
+            }
+        }
+    }
+
+    private Object itemOf(Object itemStack) {
+        Method m = getItemMethod;
+        if (m == null) {
+            if (getItemFailed) return null;
+            m = resolveGetItem(itemStack.getClass());
+            if (m == null) { getItemFailed = true; return null; }
+            getItemMethod = m;
+        }
+        try { return m.invoke(itemStack); } catch (Throwable t) { return null; }
+    }
+
+    private static final String[] ITEM_NAMES = {
+            "net.minecraft.class_1792", "net.minecraft.world.item.Item" };
+
+    /**
+     * {@code ItemStack.getItem(): Item} — no-arg cuyo retorno está nombrado
+     * {@code ITEM_NAMES}. A diferencia de {@code BlockState→Block} (que exige
+     * calibración por identidad, ver {@link #resolveGetBlock}), acá no hay
+     * ambigüedad estructural: el nombre de retorno alcanza (mismo patrón que
+     * {@code InProcess.resolveGetItem}).
+     */
+    private Method resolveGetItem(Class<?> itemStackClass) {
+        for (Method m : itemStackClass.getMethods()) {
+            if (Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getParameterTypes().length != 0) continue;
+            if (!isNamed(m.getReturnType(), ITEM_NAMES)) continue;
+            m.setAccessible(true);
+            return m;
+        }
+        return null;
+    }
+
+    private static boolean isNamed(Class<?> c, String[] names) {
+        String n = c.getName();
+        for (String s : names) if (s.equals(n)) return true;
+        return false;
+    }
+
+    /**
+     * Paso A: invocado por el bytecode inyectado a la ENTRADA de
+     * {@code CreativeModeTab.buildContents(ItemDisplayParameters)} — captura pasiva
+     * (estilo Tier3LiveCapture) del último {@code ItemDisplayParameters} real visto.
+     * Latest-wins: cada llamada sobreescribe (siempre el contexto más fresco). No lanza.
+     */
+    @Override
+    public void captureTabDisplayParams(Object params) {
+        if (params == null) return;
+        lastItemDisplayParams = params;
+        tabParamsCapturedCount.incrementAndGet();
+    }
+
+    /**
+     * Fuerza un rebuild de TODAS las pestañas de inventario creativo registradas,
+     * reinvocando reflectivamente {@code ItemGroups.updateEntries(ItemDisplayParameters)}
+     * (el orquestador vanilla real, no el {@code buildContents} por-pestaña) con el
+     * último parámetro observado (Paso A). Se invoca DOS veces: la 1a pasada vuelca
+     * el veto/restitución a {@code shouldDisplay()}; recién en la 2a pasada el
+     * repaginado de Fabric (inyectado en el HEAD de {@code updateEntries}, que por
+     * eso ve el estado de la pasada anterior) lee ese {@code shouldDisplay()} fresco
+     * y cierra el hueco, reasignando fila/columna/página de las pestañas restantes.
+     * Best-effort e idempotente: si aún no se capturó ningún
+     * {@code ItemDisplayParameters} en esta sesión (inventario creativo nunca
+     * abierto), o si el método no se pudo resolver, no hace nada. Se llama tras
+     * armar/desarmar el veto de pestaña para que el botón aparezca/desaparezca y las
+     * pestañas vecinas se corran, sin que el jugador tenga que reabrir el inventario.
+     */
+    public void rebuildAllCreativeTabs() {
+        tabRebuildCalls.incrementAndGet();
+        try {
+            Object params = lastItemDisplayParams;
+            if (params == null) { tabRebuildLastSkipReason = "no_params_captured"; return; }
+            Method update = updateEntriesMethod;
+            if (update == null && !updateEntriesFailed) {
+                update = resolveUpdateEntries(params);
+                if (update == null) { updateEntriesFailed = true; tabRebuildLastSkipReason = "update_entries_method_not_resolved"; return; }
+                updateEntriesMethod = update;
+            }
+            if (update == null) return;
+            tabRebuildLastSkipReason = null;
+            // Informativo: tamaño del registro de pestañas (no bloquea si falla).
+            try {
+                Instrumentation inst = Agent.instrumentation;
+                if (inst != null) {
+                    Object[] reg = Wcg.liveRegistry(inst, "minecraft:creative_mode_tab");
+                    if (reg != null) {
+                        int n = 0;
+                        for (Object ignored : (Iterable<?>) reg[0]) n++;
+                        tabRebuildTabsSeen.addAndGet(n);
+                    }
+                }
+            } catch (Throwable ignored) {
+                // puramente informativo, no afecta el rebuild real
+            }
+            // Dos pasadas: la 1a vuelca el veto/restitución a shouldDisplay(); la 2a
+            // deja que el repaginado de Fabric (que lee shouldDisplay() al HEAD de
+            // esta misma llamada) cierre el hueco o restaure la posición original.
+            for (int pass = 0; pass < 2; pass++) {
+                try {
+                    update.invoke(null, params);
+                    tabRebuildInvoked.incrementAndGet();
+                } catch (Throwable t) {
+                    tabRebuildInvokeErrors.incrementAndGet();
+                    tabRebuildLastError = String.valueOf(t);
+                }
+            }
+        } catch (Throwable t) {
+            tabRebuildLastError = String.valueOf(t);
+            warnOnce("rebuildAllCreativeTabs: " + t);
+        }
+    }
+
+    /**
+     * {@code ItemGroups.updateEntries(ItemDisplayParameters): void} — único método
+     * {@code static}/{@code void} de esa clase con exactamente 1 parámetro instancia
+     * de {@code params} (confirmado por {@code javap}: es el único método estático
+     * de esa forma en {@code class_7706}/{@code ItemGroups}).
+     */
+    private Method resolveUpdateEntries(Object params) {
+        Class<?> cls = itemGroupsClass;
+        if (cls == null) {
+            ClassLoader cl = params.getClass().getClassLoader();
+            String[] names = { "net.minecraft.class_7706", "net.minecraft.item.ItemGroups" };
+            for (String name : names) {
+                try {
+                    cls = Class.forName(name, false, cl);
+                    break;
+                } catch (Throwable ignored) {
+                    cls = null;
+                }
+            }
+            if (cls == null) return null;
+            itemGroupsClass = cls;
+        }
+        for (Method m : cls.getDeclaredMethods()) {
+            if (!Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getReturnType() != void.class) continue;
+            Class<?>[] p = m.getParameterTypes();
+            if (p.length != 1) continue;
+            if (!p[0].isInstance(params)) continue;
+            m.setAccessible(true);
+            return m;
+        }
+        return null;
     }
 
     /**
@@ -1212,6 +1585,14 @@ public final class Ledger implements LedgerSink {
         return ns;
     }
 
+    private String resolveRuntimeOwner(Object listener) {
+        if (listener != null) {
+            String ns = nsForClass(listener.getClass());
+            if (!"minecraft".equals(ns)) return ns;
+        }
+        return resolveActor();
+    }
+
     private String computeNsForClass(Class<?> c) {
         String n = c.getName();
         if (n.startsWith("net.minecraft.") || n.startsWith("java.") || n.startsWith("jdk.")
@@ -1881,6 +2262,329 @@ public final class Ledger implements LedgerSink {
         }
     }
 
+    @Override
+    public void onRuntimeSubscribe(String api, Object busOrEvent, Object phase, Object listener) {
+        if (Boolean.TRUE.equals(suppressRuntimeCapture.get())) return;
+        runtimeSubscribeCalls.incrementAndGet();
+        try {
+            String owner = resolveRuntimeOwner(listener);
+            if (owner == null || owner.isEmpty()) owner = "#unknown";
+            if ("minecraft".equals(owner)) runtimeSubscribeUnknown.incrementAndGet();
+            else runtimeSubscribeAttributed.incrementAndGet();
+            String surface = api == null || api.isEmpty() ? "unknown" : api;
+            String key = surface + "\n" + owner;
+            RuntimeBucket b = runtimeBuckets.get(key);
+            if (b == null) {
+                RuntimeBucket fresh = new RuntimeBucket(surface, owner);
+                RuntimeBucket prev = runtimeBuckets.putIfAbsent(key, fresh);
+                b = prev == null ? fresh : prev;
+            }
+            b.total.incrementAndGet();
+            if (listener != null) b.refs.add(new RuntimeRef(surface, owner, busOrEvent, phase, listener));
+            if (listener != null && b.sampleClass == null) b.sampleClass = listener.getClass().getName();
+            if (busOrEvent != null && b.sampleEvent == null) b.sampleEvent = busOrEvent.getClass().getName();
+        } catch (Throwable t) {
+            runtimeSubscribeUnknown.incrementAndGet();
+            warnOnce("onRuntimeSubscribe: " + t);
+        }
+    }
+
+    @Override
+    public void onMixinApplyOrder(String targetClassName, String mixinName, int priority) {
+        if (targetClassName == null || mixinName == null) return;
+        try {
+            CopyOnWriteArrayList<MixinOrderEntry> list = mixinOrderByTarget.get(targetClassName);
+            if (list == null) {
+                CopyOnWriteArrayList<MixinOrderEntry> fresh = new CopyOnWriteArrayList<MixinOrderEntry>();
+                CopyOnWriteArrayList<MixinOrderEntry> prev = mixinOrderByTarget.putIfAbsent(targetClassName, fresh);
+                list = prev == null ? fresh : prev;
+            }
+            list.add(new MixinOrderEntry(mixinName, priority));
+        } catch (Throwable t) {
+            warnOnce("onMixinApplyOrder: " + t);
+        }
+    }
+
+    /** T3 corte K: secuencia real capturada para un target, o lista vacia. Usado por Tier3MixinAudit. */
+    List<MixinOrderEntry> mixinApplyOrder(String targetClassName) {
+        CopyOnWriteArrayList<MixinOrderEntry> list = mixinOrderByTarget.get(targetClassName);
+        return list == null ? Collections.<MixinOrderEntry>emptyList() : list;
+    }
+
+    public Map<String, Object> runtimeRefs(String ns) {
+        Map<String, Object> root = new HashMap<String, Object>();
+        root.put("ok", Boolean.TRUE);
+        root.put("calls", runtimeSubscribeCalls.get());
+        root.put("attributed", runtimeSubscribeAttributed.get());
+        root.put("unknown", runtimeSubscribeUnknown.get());
+        root.put("disabledRefs", runtimeDisabledRefs.get());
+        root.put("bucketsTotal", (long) runtimeBuckets.size());
+        List<Object> buckets = new ArrayList<Object>();
+        Map<String, Long> byOwner = new HashMap<String, Long>();
+        Map<String, Long> byApi = new HashMap<String, Long>();
+        long refsKept = 0;
+        long activeRefs = 0;
+        for (RuntimeBucket b : runtimeBuckets.values()) {
+            long n = b.total.get();
+            long bucketActive = 0;
+            synchronized (b.refs) {
+                for (RuntimeRef r : b.refs) if (!r.disabled) bucketActive++;
+            }
+            Long ownerPrev = byOwner.get(b.owner);
+            byOwner.put(b.owner, Long.valueOf((ownerPrev == null ? 0L : ownerPrev.longValue()) + n));
+            Long apiPrev = byApi.get(b.api);
+            byApi.put(b.api, Long.valueOf((apiPrev == null ? 0L : apiPrev.longValue()) + n));
+            if (ns != null && !ns.isEmpty() && !ns.equals(b.owner)) continue;
+            refsKept += b.refs.size();
+            activeRefs += bucketActive;
+            Map<String, Object> m = new HashMap<String, Object>();
+            m.put("api", b.api);
+            m.put("owner", b.owner);
+            m.put("count", n);
+            m.put("refsKept", (long) b.refs.size());
+            m.put("activeRefs", bucketActive);
+            m.put("disabledRefs", (long) b.refs.size() - bucketActive);
+            if (b.sampleClass != null) m.put("sampleClass", b.sampleClass);
+            if (b.sampleEvent != null) m.put("sampleEvent", b.sampleEvent);
+            buckets.add(m);
+        }
+        root.put("refsKept", refsKept);
+        root.put("activeRefs", activeRefs);
+        root.put("byOwner", byOwner);
+        root.put("byApi", byApi);
+        root.put("buckets", buckets);
+        if (ns != null && !ns.isEmpty()) root.put("ns", ns);
+        return root;
+    }
+
+    public Map<String, Object> runtimeDisable(String ns) {
+        Map<String, Object> root = new HashMap<String, Object>();
+        if (ns == null || ns.isEmpty()) {
+            root.put("ok", Boolean.FALSE);
+            root.put("error", "BAD_PARAMS");
+            return root;
+        }
+        int attempted = 0, removed = 0, already = 0, errors = 0;
+        for (RuntimeBucket b : runtimeBuckets.values()) {
+            if (!ns.equals(b.owner)) continue;
+            synchronized (b.refs) {
+                for (RuntimeRef r : b.refs) {
+                    attempted++;
+                    if (r.disabled) { already++; continue; }
+                    try {
+                        if (runtimeRemoveRef(r)) {
+                            r.disabled = true;
+                            removed++;
+                            runtimeDisabledRefs.incrementAndGet();
+                        } else {
+                            errors++;
+                        }
+                    } catch (Throwable t) {
+                        errors++;
+                        warnOnce("runtimeDisable: " + t);
+                    }
+                }
+            }
+        }
+        root.put("ok", Boolean.TRUE);
+        root.put("ns", ns);
+        root.put("attempted", (long) attempted);
+        root.put("removed", (long) removed);
+        root.put("alreadyDisabled", (long) already);
+        root.put("errors", (long) errors);
+        root.put("refs", runtimeRefs(ns));
+        return root;
+    }
+
+    public Map<String, Object> runtimeRestore(String ns) {
+        Map<String, Object> root = new HashMap<String, Object>();
+        if (ns == null || ns.isEmpty()) {
+            root.put("ok", Boolean.FALSE);
+            root.put("error", "BAD_PARAMS");
+            return root;
+        }
+        int attempted = 0, restored = 0, already = 0, errors = 0;
+        suppressRuntimeCapture.set(Boolean.TRUE);
+        try {
+            for (RuntimeBucket b : runtimeBuckets.values()) {
+                if (!ns.equals(b.owner)) continue;
+                synchronized (b.refs) {
+                    for (RuntimeRef r : b.refs) {
+                        attempted++;
+                        if (!r.disabled) { already++; continue; }
+                        try {
+                            runtimeRestoreRef(r);
+                            r.disabled = false;
+                            restored++;
+                            runtimeDisabledRefs.decrementAndGet();
+                        } catch (Throwable t) {
+                            errors++;
+                            warnOnce("runtimeRestore: " + t);
+                        }
+                    }
+                }
+            }
+        } finally {
+            suppressRuntimeCapture.remove();
+        }
+        root.put("ok", Boolean.TRUE);
+        root.put("ns", ns);
+        root.put("attempted", (long) attempted);
+        root.put("restored", (long) restored);
+        root.put("alreadyActive", (long) already);
+        root.put("errors", (long) errors);
+        root.put("refs", runtimeRefs(ns));
+        return root;
+    }
+
+    private boolean runtimeRemoveFabricRef(RuntimeRef ref) throws Exception {
+        if (!"fabric-event".equals(ref.api) || ref.event == null || ref.listener == null) return false;
+        Object lock = fieldValue(ref.event, "lock");
+        synchronized (lock != null ? lock : ref.event) {
+            List<?> phases = (List<?>) fieldValue(ref.event, "sortedPhases");
+            int total = 0;
+            boolean changed = false;
+            for (Object phaseData : phases) {
+                Object id = fieldValue(phaseData, "id");
+                if (ref.phase != null && id != ref.phase && !ref.phase.equals(id)) {
+                    total += Array.getLength(fieldValue(phaseData, "listeners"));
+                    continue;
+                }
+                Object listeners = fieldValue(phaseData, "listeners");
+                int len = Array.getLength(listeners);
+                List<Object> keep = new ArrayList<Object>(len);
+                boolean phaseChanged = false;
+                for (int i = 0; i < len; i++) {
+                    Object cur = Array.get(listeners, i);
+                    if (cur == ref.listener) { changed = true; phaseChanged = true; }
+                    else keep.add(cur);
+                }
+                if (phaseChanged) {
+                    Object next = Array.newInstance(listeners.getClass().getComponentType(), keep.size());
+                    for (int i = 0; i < keep.size(); i++) Array.set(next, i, keep.get(i));
+                    setFieldValue(phaseData, "listeners", next);
+                    total += keep.size();
+                } else {
+                    total += len;
+                }
+            }
+            if (changed) invokeRebuildInvoker(ref.event, total);
+            return changed;
+        }
+    }
+
+    private void runtimeRestoreFabricRef(RuntimeRef ref) throws Exception {
+        if (!"fabric-event".equals(ref.api) || ref.event == null || ref.listener == null) {
+            throw new IllegalArgumentException("not a fabric event ref");
+        }
+        Method register = ref.event.getClass().getDeclaredMethod("register", ref.phase.getClass(), Object.class);
+        register.setAccessible(true);
+        register.invoke(ref.event, ref.phase, ref.listener);
+    }
+
+    private boolean runtimeRemoveRef(RuntimeRef ref) throws Exception {
+        if ("fabric-event".equals(ref.api)) return runtimeRemoveFabricRef(ref);
+        if ("fabric-networking-global".equals(ref.api)) return runtimeRemoveFabricGlobalReceiver(ref);
+        if ("fabric-networking-connection".equals(ref.api)) return runtimeRemoveFabricConnectionReceiver(ref);
+        return false;
+    }
+
+    private void runtimeRestoreRef(RuntimeRef ref) throws Exception {
+        if ("fabric-event".equals(ref.api)) {
+            runtimeRestoreFabricRef(ref);
+            return;
+        }
+        if ("fabric-networking-global".equals(ref.api)) {
+            runtimeRestoreFabricGlobalReceiver(ref);
+            return;
+        }
+        if ("fabric-networking-connection".equals(ref.api)) {
+            runtimeRestoreFabricConnectionReceiver(ref);
+            return;
+        }
+        throw new IllegalArgumentException("unsupported runtime ref api=" + ref.api);
+    }
+
+    private boolean runtimeRemoveFabricGlobalReceiver(RuntimeRef ref) throws Exception {
+        if (ref.event == null || ref.phase == null || ref.listener == null) return false;
+        Method getHandler = ref.event.getClass().getDeclaredMethod("getHandler", ref.phase.getClass());
+        getHandler.setAccessible(true);
+        Object current = getHandler.invoke(ref.event, ref.phase);
+        if (current != ref.listener) return false;
+        Method unregister = ref.event.getClass().getDeclaredMethod("unregisterGlobalReceiver", ref.phase.getClass());
+        unregister.setAccessible(true);
+        Object removed = unregister.invoke(ref.event, ref.phase);
+        return removed == ref.listener;
+    }
+
+    private void runtimeRestoreFabricGlobalReceiver(RuntimeRef ref) throws Exception {
+        if (ref.event == null || ref.phase == null || ref.listener == null) {
+            throw new IllegalArgumentException("not a fabric networking global ref");
+        }
+        Method register = ref.event.getClass().getDeclaredMethod("registerGlobalReceiver", ref.phase.getClass(), Object.class);
+        register.setAccessible(true);
+        Object ok = register.invoke(ref.event, ref.phase, ref.listener);
+        if (!Boolean.TRUE.equals(ok)) {
+            throw new IllegalStateException("registerGlobalReceiver returned " + ok);
+        }
+    }
+
+    private boolean runtimeRemoveFabricConnectionReceiver(RuntimeRef ref) throws Exception {
+        if (ref.event == null || ref.phase == null || ref.listener == null) return false;
+        Method getHandler = ref.event.getClass().getMethod("getHandler", ref.phase.getClass());
+        getHandler.setAccessible(true);
+        Object current = getHandler.invoke(ref.event, ref.phase);
+        if (current != ref.listener) return false;
+        Method unregister = ref.event.getClass().getMethod("unregisterChannel", ref.phase.getClass());
+        unregister.setAccessible(true);
+        Object removed = unregister.invoke(ref.event, ref.phase);
+        return removed == ref.listener;
+    }
+
+    private void runtimeRestoreFabricConnectionReceiver(RuntimeRef ref) throws Exception {
+        if (ref.event == null || ref.phase == null || ref.listener == null) {
+            throw new IllegalArgumentException("not a fabric networking connection ref");
+        }
+        Method register = ref.event.getClass().getMethod("registerChannel", ref.phase.getClass(), Object.class);
+        register.setAccessible(true);
+        Object ok = register.invoke(ref.event, ref.phase, ref.listener);
+        if (!Boolean.TRUE.equals(ok)) {
+            throw new IllegalStateException("registerChannel returned " + ok);
+        }
+    }
+
+    private static Object fieldValue(Object target, String name) throws Exception {
+        Field f = findField(target.getClass(), name);
+        f.setAccessible(true);
+        return f.get(target);
+    }
+
+    private static void setFieldValue(Object target, String name, Object value) throws Exception {
+        Field f = findField(target.getClass(), name);
+        f.setAccessible(true);
+        f.set(target, value);
+    }
+
+    private static Field findField(Class<?> c, String name) throws NoSuchFieldException {
+        Class<?> cur = c;
+        while (cur != null) {
+            try { return cur.getDeclaredField(name); }
+            catch (NoSuchFieldException ignored) { cur = cur.getSuperclass(); }
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    private static void invokeRebuildInvoker(Object event, int total) throws Exception {
+        Method m = event.getClass().getDeclaredMethod("rebuildInvoker", int.class);
+        m.setAccessible(true);
+        m.invoke(event, Integer.valueOf(total));
+    }
+
+    public long runtimeSubscribeCallsCount() { return runtimeSubscribeCalls.get(); }
+    public long runtimeSubscribeAttributedCount() { return runtimeSubscribeAttributed.get(); }
+    public long runtimeSubscribeUnknownCount() { return runtimeSubscribeUnknown.get(); }
+    public long runtimeDisabledRefsCount() { return runtimeDisabledRefs.get(); }
+
     /**
      * Aplica un cambio de namespace en una celda al agregado {@link #byChunk}:
      * decrementa {@code prevNs} (si es modded) e incrementa {@code newNs} (si lo
@@ -2549,11 +3253,11 @@ public final class Ledger implements LedgerSink {
         Set<String> vetoed = armedBlockVeto;
         List<Object> out = new ArrayList<Object>(src.size());
         int iconsServed = 0;
-        for (Map<String, Object> m : src) {
-            Map<String, Object> e = new HashMap<String, Object>();
-            e.put("id", m.get("id"));
-            e.put("name", m.get("name"));
-            e.put("version", m.get("version"));
+          for (Map<String, Object> m : src) {
+              Map<String, Object> e = new HashMap<String, Object>();
+              e.put("id", m.get("id"));
+              e.put("name", m.get("name"));
+              e.put("version", m.get("version"));
             Object nsList = m.get("namespaces");
             e.put("namespaces", nsList);
             e.put("tier", m.get("tier"));
@@ -2575,22 +3279,29 @@ public final class Ledger implements LedgerSink {
                     e.put("icon", java.util.Base64.getEncoder().encodeToString(iconBytes));
                     iconsServed++;
                 }
-            }
-            // running = no veto armado para ningun namespace del mod. Si un mod
-            // declara varios, queda "off" en cuanto cualquiera este vetado.
-            boolean running = true;
-            if (nsList instanceof List) {
-                for (Object o : (List<?>) nsList) {
+              }
+              Object semantic = m.get("semantic");
+              if (semantic instanceof Map) e.put("semantic", semantic);
+              // running = no veto armado para ningun namespace del mod. Si un mod
+              // declara varios, queda "off" en cuanto cualquiera este vetado.
+              boolean running = true;
+              if (nsList instanceof List) {
+                  for (Object o : (List<?>) nsList) {
                     if (o != null && vetoed.contains(String.valueOf(o))) { running = false; break; }
                 }
             }
             e.put("running", running);
-            // Tier 1 es lo único cubierto por el binomio in-process (sweep + filter
-            // + dpReload + restitución viva). El panel pinta el botón gris para los
-            // demás con tooltip explicativo.
+            // Tier 1/2 siempre soportados (binomio in-process: sweep + filter +
+            // dpReload + restitucion viva). T3 corte tender-seeking-fern (tarea
+            // #35): Tier3DemixApply.disableGroup/enableGroup ya estan cableados
+            // de verdad en disableOne/enableOne -- el boton ya no debe quedar
+            // gris a priori para Tier 3. La seguridad real sigue viviendo en el
+            // gate (canLowerDecision, clasificacion RESET/REPLAY/BLOCKED en vivo):
+            // si el mod concreto no es viable, el click igual falla limpio con
+            // TIER3_DEMIX_NOT_EXECUTABLE (mismo camino de banner de error que
+            // cualquier otro fallo de runAction), nunca fingiendo soporte.
             Object tier = m.get("tier");
-            e.put("supportedDisable",
-                    tier instanceof Integer && ((Integer) tier).intValue() == 1);
+            e.put("supportedDisable", tier instanceof Integer && ((Integer) tier).intValue() >= 1);
             out.add(e);
         }
         Map<String, Object> root = new HashMap<String, Object>();
@@ -2606,14 +3317,7 @@ public final class Ledger implements LedgerSink {
         if (ns == null || ns.isEmpty()) {
             return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
         }
-        try {
-            String path = modThinRestorePath(ns);
-            ensureParent(path);
-            Map<String, Object> r = InProcess.INSTANCE.tier1Disable(ns, path);
-            return Agent.Json.write(modThinReceiptToReply(r));
-        } catch (Throwable t) {
-            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
-        }
+        return Agent.Json.write(disableOne(ns));
     }
 
     @Override
@@ -2621,18 +3325,156 @@ public final class Ledger implements LedgerSink {
         if (ns == null || ns.isEmpty()) {
             return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
         }
+        return Agent.Json.write(enableOne(ns));
+    }
+
+    /**
+     * Cascade disable (§forward): apaga {@code nsCsv} (mod raiz + dependencias
+     * huerfanas, separados por coma, orden = raiz primero) como una sola operacion.
+     * Pre-flight barato (gate Tier 3, sin mutar nada): si cualquier miembro no es
+     * ejecutable, se aborta el grupo entero antes de tocar el mundo. Si un miembro
+     * falla durante la ejecucion real, se revierte (enableOne) lo ya aplicado en
+     * orden inverso. En exito, registra el grupo en cascadeGroupMembers para que
+     * modThinEnable(raiz) restaure los companeros automaticamente despues.
+     */
+    @Override
+    public String modThinDisableGroup(String nsCsv) {
+        if (nsCsv == null || nsCsv.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "nsCsv vacio"));
+        }
+        String[] members = nsCsv.split(",");
+        for (String ns : members) {
+            Map<String, Object> mod = findModByNamespace(ns);
+            Integer tier = modTier(mod);
+            if (!isMemberExecutable(ns, mod, tier)) {
+                Map<String, Object> err = modThinErr("GROUP_BLOCKED",
+                        "'" + ns + "' no es ejecutable todavia (tier " + tier + ").");
+                err.put("blockedNs", ns);
+                return Agent.Json.write(err);
+            }
+        }
+        List<String> applied = new ArrayList<String>();
+        List<Object> perMember = new ArrayList<Object>();
+        for (String ns : members) {
+            Map<String, Object> reply = disableOne(ns);
+            perMember.add(reply);
+            if (!Boolean.TRUE.equals(reply.get("ok"))) {
+                for (int i = applied.size() - 1; i >= 0; i--) enableOne(applied.get(i));
+                Map<String, Object> err = modThinErr("GROUP_PARTIAL_FAILURE",
+                        "'" + ns + "' fallo; se revirtieron " + applied.size() + " miembro(s) ya aplicados.");
+                err.put("failedNs", ns);
+                err.put("rolledBack", applied);
+                err.put("perMember", perMember);
+                return Agent.Json.write(err);
+            }
+            applied.add(ns);
+        }
+        if (members.length > 1) {
+            cascadeGroupMembers.put(members[0],
+                    new ArrayList<String>(Arrays.asList(members).subList(1, members.length)));
+        }
+        Map<String, Object> root = new HashMap<String, Object>();
+        root.put("ok", Boolean.TRUE);
+        root.put("members", applied);
+        root.put("perMember", perMember);
+        return Agent.Json.write(root);
+    }
+
+    private Map<String, Object> disableOne(String ns) {
         try {
+            Map<String, Object> mod = findModByNamespace(ns);
+            Integer tier = modTier(mod);
+            if (tier != null && tier.intValue() >= 3) {
+                Map<String, Object> plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
+                Map<String, Object> gate = mapObj(plan.get("txGate"));
+                if (!Boolean.TRUE.equals(gate.get("canLowerDecision"))) {
+                    Map<String, Object> err = modThinErr("TIER3_DEMIX_NOT_EXECUTABLE",
+                            "Tier 3 requiere demix transaccional viable antes de ejecutar disable hot.");
+                    err.put("ns", ns);
+                    err.put("tier", tier);
+                    err.put("t3TxGate", gate);
+                    err.put("t3MixinPlan", plan);
+                    return err;
+                }
+                // T3 corte tender-seeking-fern (tarea #33): el gate ya confirmo
+                // canLowerDecision=true -- ejecuta de verdad, generalizado a
+                // CUALQUIER namespace (Tier3MixinAudit.scanTargets, no una
+                // whitelist tipeada a mano). expectedModes viaja el modo que el
+                // gate acaba de auditar; Tier3DemixApply.disableGroup lo
+                // re-verifica en vivo en el momento de aplicar (anti-TOCTOU) y
+                // aborta sin mutar nada si algo derivo entre el gate y este apply.
+                Set<String> targets = Tier3MixinAudit.scanTargets(ns);
+                if (targets.isEmpty()) {
+                    Map<String, Object> err = modThinErr("TIER3_NO_TARGETS",
+                            "El gate permitiria bajar decision, pero no se encontraron targets declarados para " + ns + ".");
+                    err.put("ns", ns);
+                    err.put("tier", tier);
+                    return err;
+                }
+                Map<String, Tier3MixinAudit.TargetClassification> classification =
+                        Tier3MixinAudit.classifyDemixTargets(ns, targets, Agent.instrumentation);
+                Map<String, String> expectedModes = new java.util.LinkedHashMap<String, String>();
+                for (Map.Entry<String, Tier3MixinAudit.TargetClassification> e : classification.entrySet()) {
+                    expectedModes.put(e.getKey(), e.getValue().mode.name());
+                }
+                Map<String, Object> r = Tier3DemixApply.disableGroup(
+                        Agent.instrumentation, targets.toArray(new String[0]), ns, expectedModes);
+                return modThinReceiptToReply(r);
+            }
+            String path = modThinRestorePath(ns);
+            ensureParent(path);
+            Map<String, Object> r = InProcess.INSTANCE.tier1Disable(ns, path);
+            if (isReceiptOk(r)) {
+                r.put("runtime", runtimeDisable(ns));
+            }
+            return modThinReceiptToReply(r);
+        } catch (Throwable t) {
+            return modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+    }
+
+    private Map<String, Object> enableOne(String ns) {
+        try {
+            // T3 corte tender-seeking-fern (tarea #33): si hay targets
+            // desactivados registrados para este namespace (DISABLED_BY_NS,
+            // poblado por disableGroup), este mod fue apagado via el camino
+            // tier3 real -- restaura ESOS targets (registro en vivo, no
+            // re-escaneado de disco, que pudo cambiar mientras estaba
+            // desactivado) via Tier3DemixApply.enableGroup. Si no hay
+            // registro, sigue el camino tier1/2 existente sin cambios.
+            List<Tier3DemixApply.DisabledTargetRecord> t3records =
+                    Tier3DemixApply.disabledRecordsForNamespace(ns);
+            if (t3records != null && !t3records.isEmpty()) {
+                String[] targets = new String[t3records.size()];
+                for (int i = 0; i < t3records.size(); i++) targets[i] = t3records.get(i).target;
+                Map<String, Object> r = Tier3DemixApply.enableGroup(Agent.instrumentation, targets, ns);
+                return modThinReceiptToReply(r);
+            }
             String path = modThinRestorePath(ns);
             if (!new File(path).isFile()) {
                 Map<String, Object> err = modThinErr("NO_RESTORE",
                         "no hay archivo de restauracion para '" + ns + "'");
                 err.put("path", path);
-                return Agent.Json.write(err);
+                return err;
             }
             Map<String, Object> r = InProcess.INSTANCE.tier1Enable(ns, path);
-            return Agent.Json.write(modThinReceiptToReply(r));
+            if (isReceiptOk(r)) {
+                r.put("runtime", runtimeRestore(ns));
+            }
+            Map<String, Object> reply = modThinReceiptToReply(r);
+            if (Boolean.TRUE.equals(reply.get("ok"))) {
+                List<String> companions = cascadeGroupMembers.remove(ns);
+                if (companions != null && !companions.isEmpty()) {
+                    List<Object> restored = new ArrayList<Object>();
+                    for (int i = companions.size() - 1; i >= 0; i--) {
+                        restored.add(enableOne(companions.get(i)));
+                    }
+                    reply.put("cascadeRestored", restored);
+                }
+            }
+            return reply;
         } catch (Throwable t) {
-            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+            return modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage());
         }
     }
 
@@ -2645,12 +3487,470 @@ public final class Ledger implements LedgerSink {
     }
 
     /**
+     * Vista previa de impacto al desactivar {@code ns} (§3.30), en dos capas:
+     *   1) hardDeps — mods que DECLARAN depender del mod víctima (inverso de
+     *      Boot.mods "deps", que ya solo recoge la clase DEPENDS). Son roturas
+     *      duras a ojos del loader: el juego no arrancaría con el jar fuera.
+     *   2) cascade  — referencias cruzadas NO declaradas, calculadas en vivo por
+     *      InProcess.wcgRefs (recetas rotas/debilitadas, tags afectados/vaciados,
+     *      loot tables, dueños ajenos). Es el daño silencioso que el loader no ve.
+     * Ambas capas se computan aquí (el agente tiene Boot.mods + InProcess) y se
+     * aplanan a un resumen compacto; el panel solo pinta números y nombres.
+     */
+    @Override
+    public String modThinDeps(String ns) {
+        if (ns == null || ns.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
+        }
+        List<Map<String, Object>> src = Boot.mods;
+
+        // ns→nombre y ns→id, para enriquecer dueños y resolver el id de la víctima.
+        Map<String, String> nameByNs = new HashMap<String, String>();
+        String victimId = ns;
+        for (Map<String, Object> m : src) {
+            Object id = m.get("id");
+            Object name = m.get("name");
+            Object nsList = m.get("namespaces");
+            if (nsList instanceof List) {
+                for (Object o : (List<?>) nsList) {
+                    if (o == null) continue;
+                    String s = String.valueOf(o);
+                    if (name != null) nameByNs.put(s, String.valueOf(name));
+                    if (s.equals(ns) && id != null) victimId = String.valueOf(id);
+                }
+            }
+        }
+
+        // Capa 1 — hard-deps inversas: mods cuyo "deps" lista el id de la víctima.
+        List<Object> hardDeps = new ArrayList<Object>();
+        for (Map<String, Object> m : src) {
+            Object deps = m.get("deps");
+            if (!(deps instanceof List)) continue;
+            boolean dependsOnVictim = false;
+            for (Object d : (List<?>) deps) {
+                if (d != null && victimId.equals(String.valueOf(d))) { dependsOnVictim = true; break; }
+            }
+            if (!dependsOnVictim) continue;
+            Map<String, Object> hd = new HashMap<String, Object>();
+            hd.put("id", m.get("id"));
+            hd.put("name", m.get("name"));
+            hardDeps.add(hd);
+        }
+
+        // Capa 2 — cascada en vivo (wcg.refs). Si la instancia/servidor no está lista
+        // todavía, devolvemos ready=false con el motivo; la capa 1 vale igual.
+        Map<String, Object> cascade = new HashMap<String, Object>();
+        try {
+            Map<String, Object> refs = InProcess.INSTANCE.wcgRefs(ns, false);
+            if (Boolean.TRUE.equals(refs.get("ok"))) {
+                cascade.put("ready", Boolean.TRUE);
+                cascade.put("brokenRecipes", refs.get("brokenRecipes"));
+                cascade.put("weakenedRecipes", refs.get("weakenedRecipes"));
+                cascade.put("affectedResultRecipes", refs.get("affectedResultRecipes"));
+                cascade.put("affectedTagsTotal", refs.get("affectedTagsTotal"));
+                cascade.put("emptiedTags", refs.get("emptiedTags"));
+                cascade.put("affectedLootTables", refs.get("affectedLootTables"));
+                cascade.put("affectedOwners", refs.get("affectedOwners"));
+                // Dueños ajenos, aplanados y enriquecidos con nombre (cap 24).
+                List<Object> owners = new ArrayList<Object>();
+                Object byOwner = refs.get("byOwner");
+                if (byOwner instanceof Map) {
+                    for (Map.Entry<?, ?> en : ((Map<?, ?>) byOwner).entrySet()) {
+                        if (owners.size() >= 24) break;
+                        String ons = String.valueOf(en.getKey());
+                        Object info = en.getValue();
+                        Map<String, Object> ow = new HashMap<String, Object>();
+                        ow.put("ns", ons);
+                        String onm = nameByNs.get(ons);
+                        ow.put("name", onm != null ? onm : ons);
+                        if (info instanceof Map) {
+                            Map<?, ?> im = (Map<?, ?>) info;
+                            ow.put("broken", im.get("broken"));
+                            ow.put("weakened", im.get("weakened"));
+                            ow.put("affectedResult", im.get("affectedResult"));
+                            ow.put("lootAffected", im.get("lootAffected"));
+                        }
+                        owners.add(ow);
+                    }
+                }
+                cascade.put("owners", owners);
+            } else {
+                cascade.put("ready", Boolean.FALSE);
+                Object err = refs.get("error");
+                Object code = refs.get("code");
+                cascade.put("error", err != null ? String.valueOf(err)
+                        : (code != null ? String.valueOf(code) : "not_ready"));
+            }
+        } catch (Throwable t) {
+            cascade.put("ready", Boolean.FALSE);
+            cascade.put("error", t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+
+        Map<String, Object> root = new HashMap<String, Object>();
+        root.put("ok", Boolean.TRUE);
+        root.put("ns", ns);
+        root.put("hardDeps", hardDeps);
+        root.put("cascade", cascade);
+        return Agent.Json.write(root);
+    }
+
+    /**
+     * Cascade disable (§forward): dependencias PROPIAS de {@code ns} que quedarian
+     * huerfanas (sin ningun otro mod corriendo que las necesite) si se apaga.
+     * Universal a los 3 tiers: el computo es el mismo grafo para cualquier tier;
+     * cada target reporta "executable" con el mismo gate que ya usa disableOne
+     * (Tier3MixinAudit.plan -&gt; txGate.canLowerDecision, clasificacion en vivo
+     * RESET/REPLAY/BLOCKED por Tier3MixinAudit.classifyDemixTargets -- ya no una
+     * whitelist tipeada a mano), asi que un target Tier 3 cuyos mixins bloquee
+     * el escaneo en vivo (co-owners sin replay viable, consumidor externo de
+     * forma no descartado, IMixinConfigPlugin presente, etc.) sale marcado no
+     * ejecutable en vez de fingir que el grupo se puede aplicar.
+     */
+    @Override
+    public String modThinCascadeTargets(String ns) {
+        if (ns == null || ns.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
+        }
+        try {
+            LinkedHashSet<String> orphans = computeOrphanCascade(ns);
+            List<Object> targets = new ArrayList<Object>();
+            for (String depNs : orphans) {
+                Map<String, Object> mod = findModByNamespace(depNs);
+                Integer tier = modTier(mod);
+                Map<String, Object> t = new HashMap<String, Object>();
+                t.put("ns", depNs);
+                t.put("id", mod == null ? depNs : mod.get("id"));
+                t.put("name", mod == null ? depNs : mod.get("name"));
+                t.put("tier", tier);
+                t.put("executable", isMemberExecutable(depNs, mod, tier));
+                targets.add(t);
+            }
+            Map<String, Object> root = new HashMap<String, Object>();
+            root.put("ok", Boolean.TRUE);
+            root.put("ns", ns);
+            root.put("targets", targets);
+            return Agent.Json.write(root);
+        } catch (Throwable t) {
+            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+    }
+
+    /**
      * Convierte un receipt del tier1Disable/Enable (Map heterogéneo con TxJournal.Status,
      * snapshot, steps, etc.) en una respuesta compacta para el panel del jugador.
      * Aplana solo lo que la UI necesita: ok, status, blocks, chunks, restoreStats si
      * existe. El receipt completo viaja por IPC `tx.*` para diagnóstico — el mod thin
      * no lo necesita.
      */
+    @Override
+    public String modThinPlan(String ns) {
+        if (ns == null || ns.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
+        }
+        try {
+            Map<String, Object> root = new HashMap<String, Object>();
+            List<Object> actions = new ArrayList<Object>();
+            List<Object> covered = new ArrayList<Object>();
+            List<Object> residual = new ArrayList<Object>();
+            List<Object> askReasons = new ArrayList<Object>();
+            List<Object> blockedReasons = new ArrayList<Object>();
+            List<Object> requiresRestartReasons = new ArrayList<Object>();
+
+            Map<String, Object> mod = findModByNamespace(ns);
+            Integer tier = modTier(mod);
+            Map<String, Object> t3Plan = null;
+            String restorePath = modThinRestorePath(ns);
+            Map<String, Object> presence = snapshotPresence(ns);
+            long blocks = numObj(presence.get("blocks"));
+            long chunks = numObj(presence.get("chunks"));
+            Map<String, Object> runtime = runtimeRefs(ns);
+            long runtimeActive = numObj(runtime.get("activeRefs"));
+
+            actions.add(surfaceAction("datapack_filter", "Filtrar recetas/tags/loot propios del namespace."));
+            covered.add(surface("datapacks", "Recetas/tags propias se filtran por reload dirigido."));
+            actions.add(surfaceAction("block_veto", "Armar veto para nuevas colocaciones del namespace."));
+            covered.add(surface("block_veto", "Nuevas escrituras de blockstate del namespace quedan vetadas."));
+            actions.add(surfaceAction("restore_file", "Crear restore file antes de retirar contenido."));
+            if (blocks > 0 || chunks > 0) {
+                actions.add(surfaceAction("block_sweep", "Capturar y sustituir bloques vivos del namespace."));
+                covered.add(surface("blocks", blocks + " bloques en " + chunks + " chunks cubiertos por Tier 1."));
+            }
+            if (runtimeActive > 0) {
+                actions.add(surfaceAction("runtime_disable", "Desuscribir refs runtime capturadas por identidad."));
+                covered.add(surface("runtime_refs", runtimeActive + " refs runtime activas capturadas."));
+            }
+
+            if (tier == null) {
+                blockedReasons.add(reason("tier_unknown", "No hay tier confiable para este mod."));
+            } else if (tier.intValue() == 0) {
+                covered.add(surface("tier0", "Mod de datos: reload/filtrado es suficiente."));
+            } else if (tier.intValue() == 1) {
+                covered.add(surface("tier1", "Tier 1 in-process cubierto por sweep+veto+dpReload+restore."));
+            } else if (tier.intValue() == 2) {
+                covered.add(surface("tier2_runtime", "Tier 2 con refs runtime soportadas cuando fueron capturadas."));
+                askReasons.add(reason("tier2_runtime_residual",
+                        "Tier 2 puede tener callbacks/canales/ticks no capturados todavia; ejecutar requiere confirmacion."));
+            } else if (tier.intValue() >= 3) {
+                t3Plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
+                Map<String, Object> gate = mapObj(t3Plan.get("txGate"));
+                actions.add(surfaceAction("tier3_demix_tx",
+                        "Evaluar demix transaccional con receipt y rollback antes de aplicar."));
+                if (Boolean.TRUE.equals(gate.get("canLowerDecision"))) {
+                    askReasons.add(reason("tier3_demix_requires_confirmation",
+                            "Demix Tier 3 viable; ejecutar requiere confirmacion y receipt transaccional."));
+                    covered.add(surface("tier3_demix",
+                            "Demix transaccional viable con rollback requerido antes de mutar clases."));
+                } else {
+                    Map<String, Object> why = reason("tier3_demix_not_viable",
+                            "Tier 3/mixins: DisablePlan no puede bajar de requires_restart hasta que el demix sea ejecutable. Auditoria: "
+                                    + numObj(t3Plan.get("mixinClassesTotal")) + " mixins, "
+                                    + numObj(t3Plan.get("targetClassesTotal")) + " targets.");
+                    why.put("legacyCode", "tier3_no_hot_pipeline");
+                    why.put("hotEligible", t3Plan.get("hotEligible"));
+                    why.put("baseBytesCaptured", t3Plan.get("baseBytesCaptured"));
+                    why.put("txGate", gate);
+                    requiresRestartReasons.add(why);
+                }
+                residual.add(surface("mixins",
+                        "Mixins detectados; requiere demix/redefinicion antes de poder ejecutar hot."));
+            }
+
+            Map<String, Object> deps = modThinDepsMap(ns);
+            List<?> hardDeps = deps.get("hardDeps") instanceof List ? (List<?>) deps.get("hardDeps") : Collections.emptyList();
+            if (!hardDeps.isEmpty()) {
+                blockedReasons.add(reason("hard_deps", hardDeps.size() + " mods declaran depender de este mod."));
+            }
+            Object cascadeObj = deps.get("cascade");
+            if (cascadeObj instanceof Map) {
+                Map<?, ?> cascade = (Map<?, ?>) cascadeObj;
+                if (!Boolean.TRUE.equals(cascade.get("ready"))) {
+                    askReasons.add(reason("cascade_not_ready",
+                            "No se pudo calcular wcg.refs todavia; la accion no debe ejecutarse en silencio."));
+                } else if (cascadeHasImpact(cascade)) {
+                    askReasons.add(reason("cross_namespace_cascade",
+                            "wcg.refs reporta recetas/tags/loot de otros mods afectados."));
+                }
+            }
+
+            residual.add(surface("block_entities", "NBT vivo de block entities solo auto cuando el capturador/restore este probado."));
+            residual.add(surface("entities", "Entidades modded requieren capturador dedicado para restauracion exacta."));
+            residual.add(surface("worldgen", "Worldgen/biomas se planifican hot-first; reconstruccion local pendiente si hay biomas propios visibles."));
+            residual.add(surface("saved_data", "SavedData/attachments/capabilities requieren schema especifico."));
+
+            String decision = "auto";
+            boolean requiresRestart = !requiresRestartReasons.isEmpty();
+            if (requiresRestart) decision = "requires_restart";
+            else if (!blockedReasons.isEmpty()) decision = "blocked";
+            else if (!askReasons.isEmpty()) decision = "ask";
+
+            root.put("ok", Boolean.TRUE);
+            root.put("ns", ns);
+            root.put("modId", mod == null ? ns : mod.get("id"));
+            root.put("name", mod == null ? ns : mod.get("name"));
+            root.put("tier", tier);
+            root.put("decision", decision);
+            root.put("requiresRestart", Boolean.valueOf(requiresRestart));
+            root.put("requiresRestartReasons", requiresRestartReasons);
+            root.put("actions", actions);
+            root.put("coveredSurfaces", covered);
+            root.put("residualSurfaces", residual);
+            root.put("askReasons", askReasons);
+            root.put("blockedReasons", blockedReasons);
+            root.put("restorePath", restorePath);
+            boolean rollbackAvailable = true;
+            if (t3Plan != null) {
+                Map<String, Object> gate = mapObj(t3Plan.get("txGate"));
+                rollbackAvailable = Boolean.TRUE.equals(gate.get("rollbackAvailable"));
+                root.put("t3TxGate", gate);
+            }
+            root.put("rollbackAvailable", Boolean.valueOf(rollbackAvailable));
+            root.put("counts", Agent.map("blocks", blocks, "chunks", chunks, "runtimeActiveRefs", runtimeActive));
+            root.put("deps", deps);
+            if (t3Plan != null) root.put("t3MixinPlan", t3Plan);
+            root.put("policyVersion", t3Plan == null ? "t2-corte5-preview" : "t3-corte-f-tx-gate");
+            return Agent.Json.write(root);
+        } catch (Throwable t) {
+            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+    }
+
+    @Override
+    public String modThinT3MixinPlan(String ns) {
+        if (ns == null || ns.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "ns vacio"));
+        }
+        try {
+            Map<String, Object> mod = findModByNamespace(ns);
+            Map<String, Object> plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
+            return Agent.Json.write(plan);
+        } catch (Throwable t) {
+            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+    }
+
+    @Override
+    public String modThinT3StructuralUniverse() {
+        try {
+            Map<String, Object> universe = Boot.tier3StructuralUniverse;
+            return Agent.Json.write(universe == null ? Tier3MixinAudit.buildStructuralUniverse(Boot.mods, modRoots) : universe);
+        } catch (Throwable t) {
+            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+    }
+
+    @Override
+    public String modThinInventoryRegression(String victimNs, String vanillaItemId, String victimItemId) {
+        if (victimNs == null || victimNs.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "victimNs vacio"));
+        }
+        if (vanillaItemId == null || vanillaItemId.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "vanillaItemId vacio"));
+        }
+        if (victimItemId == null || victimItemId.isEmpty()) {
+            return Agent.Json.write(modThinErr("BAD_PARAMS", "victimItemId vacio"));
+        }
+        try {
+            return InProcess.INSTANCE.modThinInventoryRegression(victimNs, vanillaItemId, victimItemId);
+        } catch (Throwable t) {
+            return Agent.Json.write(modThinErr("INTERNAL", t.getClass().getSimpleName() + ": " + t.getMessage()));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> modThinDepsMap(String ns) {
+        Object parsed = Agent.Json.parse(modThinDeps(ns));
+        if (parsed instanceof Map) return (Map<String, Object>) parsed;
+        Map<String, Object> m = modThinErr("BAD_JSON", "modThinDeps no devolvio JSON objeto");
+        m.put("hardDeps", Collections.emptyList());
+        m.put("cascade", Agent.map("ready", Boolean.FALSE, "error", "bad_json"));
+        return m;
+    }
+
+    private Map<String, Object> findModByNamespace(String ns) {
+        for (Map<String, Object> m : Boot.mods) {
+            Object id = m.get("id");
+            if (id != null && ns.equals(String.valueOf(id))) return m;
+            Object nsList = m.get("namespaces");
+            if (!(nsList instanceof List)) continue;
+            for (Object o : (List<?>) nsList) {
+                if (o != null && ns.equals(String.valueOf(o))) return m;
+            }
+        }
+        return null;
+    }
+
+    private static Integer modTier(Map<String, Object> mod) {
+        if (mod == null) return null;
+        Object tier = mod.get("tier");
+        return tier instanceof Integer ? (Integer) tier : null;
+    }
+
+    /**
+     * Cascada de dependencias huerfanas (§cascade disable, direccion FORWARD):
+     * dado el ns victima, recorre su propio "deps" (lo que ESTE mod necesita,
+     * poblado por Boot.enumerateFabricMods) y agrega recursivamente cualquier
+     * dependencia que quede sin NINGUN otro mod corriendo que tambien la
+     * necesite. Fixpoint simple: cada pasada puede agregar mas miembros al
+     * grupo, lo que a su vez puede huerfanar dependencias mas profundas de esos
+     * mismos miembros (cadena completa, no solo un nivel). Devuelve solo los
+     * companeros (sin incluir victimNs).
+     */
+    private LinkedHashSet<String> computeOrphanCascade(String victimNs) {
+        LinkedHashSet<String> group = new LinkedHashSet<String>();
+        group.add(victimNs);
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (String memberNs : new ArrayList<String>(group)) {
+                Map<String, Object> member = findModByNamespace(memberNs);
+                Object depsObj = member == null ? null : member.get("deps");
+                if (!(depsObj instanceof List)) continue;
+                for (Object depIdObj : (List<?>) depsObj) {
+                    if (depIdObj == null) continue;
+                    String depId = String.valueOf(depIdObj);
+                    if (group.contains(depId)) continue;
+                    Map<String, Object> depMod = findModByNamespace(depId);
+                    if (depMod == null || !isRunningMod(depMod)) continue;
+                    if (stillNeededByOthers(depId, group)) continue;
+                    group.add(depId);
+                    changed = true;
+                }
+            }
+        }
+        group.remove(victimNs);
+        return group;
+    }
+
+    /** true si algun mod corriendo fuera del grupo (candidato a apagarse) declara depender de depId. */
+    private boolean stillNeededByOthers(String depId, Set<String> group) {
+        for (Map<String, Object> other : Boot.mods) {
+            Object otherIdObj = other.get("id");
+            String otherNs = otherIdObj == null ? null : String.valueOf(otherIdObj);
+            if (otherNs == null || group.contains(otherNs) || !isRunningMod(other)) continue;
+            Object od = other.get("deps");
+            if (od instanceof List && ((List<?>) od).contains(depId)) return true;
+        }
+        return false;
+    }
+
+    /** true si ninguno de los namespaces del mod esta hoy en armedBlockVeto. */
+    private boolean isRunningMod(Map<String, Object> mod) {
+        Object nsList = mod.get("namespaces");
+        if (!(nsList instanceof List)) return true;
+        Set<String> vetoed = armedBlockVeto;
+        for (Object o : (List<?>) nsList) {
+            if (o != null && vetoed.contains(String.valueOf(o))) return false;
+        }
+        return true;
+    }
+
+    /** tier 1/2 siempre ejecutable hoy; tier 3 depende del mismo gate que disableOne usa. */
+    private boolean isMemberExecutable(String ns, Map<String, Object> mod, Integer tier) {
+        if (tier == null) return false;
+        if (tier.intValue() <= 2) return true;
+        Map<String, Object> plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
+        Map<String, Object> gate = mapObj(plan.get("txGate"));
+        return Boolean.TRUE.equals(gate.get("canLowerDecision"));
+    }
+
+    private static Map<String, Object> surface(String id, String detail) {
+        Map<String, Object> m = new HashMap<String, Object>();
+        m.put("id", id);
+        m.put("detail", detail);
+        return m;
+    }
+
+    private static Map<String, Object> surfaceAction(String id, String detail) {
+        Map<String, Object> m = surface(id, detail);
+        m.put("status", "planned");
+        return m;
+    }
+
+    private static Map<String, Object> reason(String code, String detail) {
+        Map<String, Object> m = new HashMap<String, Object>();
+        m.put("code", code);
+        m.put("detail", detail);
+        return m;
+    }
+
+    private static long numObj(Object o) {
+        return o instanceof Number ? ((Number) o).longValue() : 0L;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mapObj(Object o) {
+        return o instanceof Map ? (Map<String, Object>) o : Collections.<String, Object>emptyMap();
+    }
+
+    private static boolean cascadeHasImpact(Map<?, ?> cascade) {
+        return numObj(cascade.get("brokenRecipes")) > 0
+                || numObj(cascade.get("weakenedRecipes")) > 0
+                || numObj(cascade.get("affectedResultRecipes")) > 0
+                || numObj(cascade.get("affectedTagsTotal")) > 0
+                || numObj(cascade.get("affectedLootTables")) > 0
+                || numObj(cascade.get("affectedOwners")) > 0;
+    }
+
     private static Map<String, Object> modThinReceiptToReply(Map<String, Object> r) {
         Map<String, Object> out = new HashMap<String, Object>();
         // tier1Disable/Enable devuelven {ok:bool|null, status, snapshot:{blocks,chunks}, ...}.
@@ -2673,7 +3973,19 @@ public final class Ledger implements LedgerSink {
         }
         if (r.get("txId") != null) out.put("txId", r.get("txId"));
         if (r.get("restorePath") != null) out.put("restorePath", String.valueOf(r.get("restorePath")));
+        Object runtime = r.get("runtime");
+        if (runtime instanceof Map) {
+            Map<?, ?> rm = (Map<?, ?>) runtime;
+            if (rm.get("removed") != null) out.put("runtimeRemoved", rm.get("removed"));
+            if (rm.get("restored") != null) out.put("runtimeRestored", rm.get("restored"));
+            if (rm.get("errors") != null) out.put("runtimeErrors", rm.get("errors"));
+        }
         return out;
+    }
+
+    private static boolean isReceiptOk(Map<String, Object> r) {
+        Object status = r.get("status");
+        return status != null && "OK".equals(String.valueOf(status));
     }
 
     private static Map<String, Object> modThinErr(String code, String msg) {

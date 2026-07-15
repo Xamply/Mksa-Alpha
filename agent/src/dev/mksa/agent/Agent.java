@@ -58,6 +58,12 @@ public final class Agent {
         // que el transformer y mucho antes de que el código inyectado se ejecute.
         installBridge(inst);
         installLedger(inst);
+        // T3 corte I: instalado ya en premain, igual que el ledger, para que la
+        // primera definicion real de cualquier clase del juego (ya tejida por
+        // Mixin, si Fabric/Forge la transformo antes de llamar a defineClass)
+        // quede visible al capturador pasivo. Ver Tier3LiveCapture.
+        Tier3LiveCapture.install(inst);
+        installSqlite();
         registerLedgerSink();
         Thread t = new Thread(new Runnable() {
             public void run() { serve(); }
@@ -96,6 +102,8 @@ public final class Agent {
 
     /** Mantiene viva la referencia al classloader del ledger (evita GC). */
     static ClassLoader ledgerLoader;
+    /** Mantiene vivo el classloader del driver SQLite opcional. */
+    static ClassLoader sqliteLoader;
 
     /**
      * Extrae mksa-ledger.jar (dev.mksa.agent.ledger.* + ASM) a un temporal y lo
@@ -130,6 +138,11 @@ public final class Agent {
             ledgerLoader = cl;
             Class<?> tr = cl.loadClass("dev.mksa.agent.ledger.LedgerTransformer");
             tr.getMethod("install", Instrumentation.class).invoke(null, inst);
+            // T3 corte K (Pilar 1b): mismo classloader aislado (necesita ASM), mismo
+            // idioma de carga por reflexion. Instalado justo despues del ledger,
+            // antes de que Fabric/Forge carguen MixinInfo.
+            Class<?> orderCapture = cl.loadClass("dev.mksa.agent.ledger.Tier3MixinOrderCapture");
+            orderCapture.getMethod("install", Instrumentation.class).invoke(null, inst);
             System.err.println("[mksa] ledger cargado en classloader aislado: " + tmp);
         } catch (Throwable th) {
             Throwable root = th;
@@ -147,6 +160,41 @@ public final class Agent {
      * LedgerSink también; Ledger (CL del sistema) la implementa. A partir de aquí
      * cada (de)serialización de chunk escanea la palette y la época es real.
      */
+    /**
+     * SQLite es opcional: si sqlite-jdbc.jar está anidado en el agent jar, se añade
+     * al classloader del agente para que DriverManager vea org.sqlite.JDBC. Si no
+     * está, wcg.refs cae al índice en memoria como antes.
+     */
+    static void installSqlite() {
+        InputStream in = null;
+        try {
+            in = Agent.class.getResourceAsStream("/sqlite-jdbc.jar");
+            if (in == null) {
+                System.err.println("[mksa] sqlite-jdbc.jar no está en el agent jar; index.db desactivado");
+                return;
+            }
+            Path tmp = Files.createTempFile("mksa-sqlite-jdbc", ".jar");
+            tmp.toFile().deleteOnExit();
+            try {
+                Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                in.close();
+                in = null;
+            }
+            java.net.URLClassLoader cl = new java.net.URLClassLoader(
+                    new java.net.URL[] { tmp.toUri().toURL() }, Agent.class.getClassLoader());
+            sqliteLoader = cl;
+            Class<?> driverClass = Class.forName("org.sqlite.JDBC", true, cl);
+            java.sql.Driver driver = (java.sql.Driver) driverClass.getDeclaredConstructor().newInstance();
+            java.sql.DriverManager.registerDriver(new DriverShim(driver));
+            System.err.println("[mksa] sqlite-jdbc cargado: " + tmp);
+        } catch (Throwable th) {
+            System.err.println("[mksa] installSqlite falló: " + th);
+        } finally {
+            if (in != null) try { in.close(); } catch (IOException ignored) {}
+        }
+    }
+
     static void registerLedgerSink() {
         try {
             Class<?> bridge = Class.forName("dev.mksa.bridge.Bridge");
@@ -181,6 +229,26 @@ public final class Agent {
     }
 
     // ---- etapas de arranque (protocolo §3.2) ----
+
+    /** Driver JDBC visible desde el classloader del agente que delega al driver real. */
+    static final class DriverShim implements java.sql.Driver {
+        private final java.sql.Driver delegate;
+        DriverShim(java.sql.Driver delegate) { this.delegate = delegate; }
+        public boolean acceptsURL(String url) throws java.sql.SQLException { return delegate.acceptsURL(url); }
+        public java.sql.Connection connect(String url, java.util.Properties info) throws java.sql.SQLException {
+            return delegate.connect(url, info);
+        }
+        public int getMajorVersion() { return delegate.getMajorVersion(); }
+        public int getMinorVersion() { return delegate.getMinorVersion(); }
+        public java.sql.DriverPropertyInfo[] getPropertyInfo(String url, java.util.Properties info)
+                throws java.sql.SQLException {
+            return delegate.getPropertyInfo(url, info);
+        }
+        public boolean jdbcCompliant() { return delegate.jdbcCompliant(); }
+        public java.util.logging.Logger getParentLogger() throws java.sql.SQLFeatureNotSupportedException {
+            return delegate.getParentLogger();
+        }
+    }
 
     static void stage(String stage, Map<String, Object> detail) {
         bootStage = stage;
@@ -441,13 +509,229 @@ public final class Agent {
                     "dpTagHookCalls", Ledger.INSTANCE.dpTagHookCallsCount(),
                     "dpLastRecipePayloadClass", Ledger.INSTANCE.dpLastRecipePayloadClass(),
                     "dpLastError", Ledger.INSTANCE.dpLastError(),
+                    // Corte tabs (toggle de pestaña de inventario creativo).
+                    "tabVetoArmed", (long) Ledger.INSTANCE.armedTabVeto().size(),
+                    "tabVetoHits", Ledger.INSTANCE.tabVetoHitsCount(),
+                    "tabVetoPassthrough", Ledger.INSTANCE.tabVetoPassthroughCount(),
+                    // Diagnóstico corte tabs: dónde se rompe la cadena captura→rebuild.
+                    "tabParamsCaptured", Ledger.INSTANCE.tabParamsCapturedCount(),
+                    "tabRebuildCalls", Ledger.INSTANCE.tabRebuildCallsCount(),
+                    "tabRebuildTabsSeen", Ledger.INSTANCE.tabRebuildTabsSeenCount(),
+                    "tabRebuildInvoked", Ledger.INSTANCE.tabRebuildInvokedCount(),
+                    "tabRebuildInvokeErrors", Ledger.INSTANCE.tabRebuildInvokeErrorsCount(),
+                    "tabRebuildLastSkipReason", Ledger.INSTANCE.tabRebuildLastSkipReason(),
+                    "tabRebuildLastError", Ledger.INSTANCE.tabRebuildLastError(),
+                    "runtimeSubscribeCalls", Ledger.INSTANCE.runtimeSubscribeCallsCount(),
+                    "runtimeSubscribeAttributed", Ledger.INSTANCE.runtimeSubscribeAttributedCount(),
+                    "runtimeSubscribeUnknown", Ledger.INSTANCE.runtimeSubscribeUnknownCount(),
+                    "runtimeDisabledRefs", Ledger.INSTANCE.runtimeDisabledRefsCount(),
                     // F4 warm-up del índice wcg.refs (lado-agente, no del ledger; expuesto
                     // aquí porque ledger.stats es la superficie de diag única del agente).
                     "refsWarmupStarted",  InProcess.INSTANCE.refsWarmupStarted(),
                     "refsWarmupReady",    InProcess.INSTANCE.refsWarmupReady(),
                     "refsWarmupAttempts", InProcess.INSTANCE.refsWarmupAttempts(),
                     "refsWarmupMs",       InProcess.INSTANCE.refsWarmupMs(),
-                    "refsWarmupError",    InProcess.INSTANCE.refsWarmupError())));
+                    "refsWarmupError",    InProcess.INSTANCE.refsWarmupError(),
+                    // SQLite opcional para wcg.refs: index.db es caché reconstruible,
+                    // nunca fuente de verdad. Si el driver falta, source queda rebuild/memory.
+                    "refsIndexSource",    InProcess.INSTANCE.refsIndexSource(),
+                    "refsSqliteDriver",   InProcess.INSTANCE.refsSqliteDriver(),
+                    "refsSqliteHit",      InProcess.INSTANCE.refsSqliteHit(),
+                    "refsSqliteMiss",     InProcess.INSTANCE.refsSqliteMiss(),
+                    "refsSqliteLoadedRows", InProcess.INSTANCE.refsSqliteLoadedRows(),
+                    "refsSqliteSavedRows",  InProcess.INSTANCE.refsSqliteSavedRows(),
+                    "refsSqlitePath",     InProcess.INSTANCE.refsSqlitePath(),
+                    "refsSqliteError",    InProcess.INSTANCE.refsSqliteError())));
+        } else if ("runtime.refs".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            c.send(res(id, Ledger.INSTANCE.runtimeRefs(ns)));
+        } else if ("runtime.disable".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "runtime.disable requiere ns", null));
+                return;
+            }
+            Map<String, Object> r = Ledger.INSTANCE.runtimeDisable(ns);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id, "INTERNAL", "runtime.disable fallo", r));
+        } else if ("runtime.restore".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "runtime.restore requiere ns", null));
+                return;
+            }
+            Map<String, Object> r = Ledger.INSTANCE.runtimeRestore(ns);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id, "INTERNAL", "runtime.restore fallo", r));
+        } else if ("tx.disablePlan".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.disablePlan requiere ns", null));
+                return;
+            }
+            Object parsed = Json.parse(Ledger.INSTANCE.modThinPlan(ns));
+            if (parsed instanceof Map) {
+                Map<String, Object> plan = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(plan.get("ok"))) c.send(res(id, plan));
+                else c.send(err(id,
+                        plan.get("code") instanceof String ? (String) plan.get("code") : "INTERNAL",
+                        String.valueOf(plan.get("error")), plan));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinPlan devolvio JSON invalido", null));
+            }
+        } else if ("t3.mixinPlan".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "t3.mixinPlan requiere ns", null));
+                return;
+            }
+            Object parsed = Json.parse(Ledger.INSTANCE.modThinT3MixinPlan(ns));
+            if (parsed instanceof Map) {
+                Map<String, Object> plan = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(plan.get("ok"))) c.send(res(id, plan));
+                else c.send(err(id,
+                        plan.get("code") instanceof String ? (String) plan.get("code") : "INTERNAL",
+                        String.valueOf(plan.get("error")), plan));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinT3MixinPlan devolvio JSON invalido", null));
+            }
+        } else if ("t3.structuralUniverse".equals(method)) {
+            Object parsed = Json.parse(Ledger.INSTANCE.modThinT3StructuralUniverse());
+            if (parsed instanceof Map) {
+                Map<String, Object> universe = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(universe.get("ok"))) c.send(res(id, universe));
+                else c.send(err(id,
+                        universe.get("code") instanceof String ? (String) universe.get("code") : "INTERNAL",
+                        String.valueOf(universe.get("error")), universe));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinT3StructuralUniverse devolvio JSON invalido", null));
+            }
+        } else if ("t3.redefineSmoke".equals(method)) {
+            Map<String, Object> r = Tier3RedefSmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.controlledDemixSmoke".equals(method)) {
+            Map<String, Object> r = Tier3ControlledDemix.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.retransformCaptureSmoke".equals(method)) {
+            Map<String, Object> r = Tier3RetransformCaptureSmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.realTargetRedefineSmoke".equals(method)) {
+            Map<String, Object> r = Tier3RealTargetRedefineSmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.realTargetContentRedefineSmoke".equals(method)) {
+            Map<String, Object> r = Tier3RealTargetContentRedefineSmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.realTargetBaseResetSmoke".equals(method)) {
+            Map<String, Object> r = Tier3RealTargetBaseResetSmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.offlineTransformCheck".equals(method)) {
+            Map<String, Object> r = Tier3OfflineTransformCheck.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.mixinReplaySmoke".equals(method)) {
+            Map<String, Object> r = Tier3MixinReplaySmoke.run(instrumentation);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("t3.fieldScanSmoke".equals(method)) {
+            Map<String, Object> r = Tier3FieldScanSmoke.run();
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id,
+                    r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("tx.disable".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.disable requiere ns", null));
+                return;
+            }
+            Object parsed = Json.parse(Ledger.INSTANCE.modThinDisable(ns));
+            if (parsed instanceof Map) {
+                Map<String, Object> reply = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(reply.get("ok"))) c.send(res(id, reply));
+                else c.send(err(id,
+                        reply.get("code") instanceof String ? (String) reply.get("code") : "INTERNAL",
+                        String.valueOf(reply.get("error")), reply));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinDisable devolvio JSON invalido", null));
+            }
+        } else if ("tx.enable".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.enable requiere ns", null));
+                return;
+            }
+            Object parsed = Json.parse(Ledger.INSTANCE.modThinEnable(ns));
+            if (parsed instanceof Map) {
+                Map<String, Object> reply = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(reply.get("ok"))) c.send(res(id, reply));
+                else c.send(err(id,
+                        reply.get("code") instanceof String ? (String) reply.get("code") : "INTERNAL",
+                        String.valueOf(reply.get("error")), reply));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinEnable devolvio JSON invalido", null));
+            }
+        } else if ("tx.inventoryRegression".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String victimNs = p != null && p.get("victimNs") instanceof String ? (String) p.get("victimNs") : null;
+            String vanillaItemId = p != null && p.get("vanillaItemId") instanceof String ? (String) p.get("vanillaItemId") : null;
+            String victimItemId = p != null && p.get("victimItemId") instanceof String ? (String) p.get("victimItemId") : null;
+            if (victimNs == null || victimNs.isEmpty() || vanillaItemId == null || vanillaItemId.isEmpty()
+                    || victimItemId == null || victimItemId.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.inventoryRegression requiere victimNs, vanillaItemId y victimItemId", null));
+                return;
+            }
+            String json = dev.mksa.bridge.Bridge.modThinInventoryRegression(victimNs, vanillaItemId, victimItemId);
+            Object parsed = Json.parse(json);
+            if (parsed instanceof Map) {
+                Map<String, Object> reply = (Map<String, Object>) parsed;
+                if (Boolean.TRUE.equals(reply.get("ok"))) c.send(res(id, reply));
+                else c.send(err(id,
+                        reply.get("code") instanceof String ? (String) reply.get("code") : "INTERNAL",
+                        String.valueOf(reply.get("error")), reply));
+            } else {
+                c.send(err(id, "INTERNAL", "modThinInventoryRegression devolvio JSON invalido", null));
+            }
+        } else if ("tx.inventorySnapshot".equals(method)) {
+            // Tier 1 corte 6: lectura cruda del inventario del jugador vivo (slot,
+            // empty, itemId), sin mutar nada. Complementa tx.inventoryRegression
+            // (que solo prueba el sweep aislado) permitiendo verificar el estado
+            // ANTES/DESPUES de un tx.tier1Disable/tier1Enable real.
+            Map<String, Object> r = InProcess.INSTANCE.inventorySnapshot();
+            if (Boolean.TRUE.equals(r.get("ok"))) {
+                c.send(res(id, r));
+            } else {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            }
         } else if ("ledger.sweepArm".equals(method)) {
             // Corte 3: arma el barrido dirigido. El launcher pasa la ruta del archivo
             // de restauración (el agente no tiene handle al servidor para conocer la
@@ -588,6 +872,100 @@ public final class Agent {
                 return;
             }
             Map<String, Object> r = InProcess.INSTANCE.tier1Enable(ns, restorePath);
+            if (Boolean.FALSE.equals(r.get("ok"))) {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            } else {
+                c.send(res(id, r));
+            }
+        } else if ("t3.demixApplyDisable".equals(method)) {
+            // T3 corte AG: primer aplicador transaccional REAL de demix (no un
+            // smoke). Corte tender-seeking-fern: namespace es ahora obligatorio --
+            // se usa para clasificar el target en vivo (RESET/REPLAY/BLOCKED) via
+            // Tier3MixinAudit.classifyDemixTargets, generalizado a cualquier mod.
+            // Reutiliza TxJournal tal cual (mismo receipt que Tier 1). Rechazos de
+            // elegibilidad/estado (target no elegible, ya desactivado, etc.) no
+            // consumen txId ni mutan nada -- ver Tier3DemixApply.
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String target = p != null && p.get("target") instanceof String ? (String) p.get("target") : null;
+            String namespace = p != null && p.get("namespace") instanceof String ? (String) p.get("namespace") : null;
+            Map<String, Object> r = Tier3DemixApply.disable(instrumentation, target, namespace);
+            if (Boolean.FALSE.equals(r.get("ok"))) {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            } else {
+                c.send(res(id, r));
+            }
+        } else if ("t3.demixApplyEnable".equals(method)) {
+            // T3 corte AG: simetrico de t3.demixApplyDisable -- redefine de vuelta a
+            // los bytes vivos originales. Solo aplica si el target esta actualmente
+            // desactivado por este mismo mecanismo (ver Tier3DemixApply.DISABLED).
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String target = p != null && p.get("target") instanceof String ? (String) p.get("target") : null;
+            Map<String, Object> r = Tier3DemixApply.enable(instrumentation, target);
+            if (Boolean.FALSE.equals(r.get("ok"))) {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            } else {
+                c.send(res(id, r));
+            }
+        } else if ("t3.demixGroupDisable".equals(method)) {
+            // T3 corte AM: aplicador GRUPAL atomico -- el caller solo manda un
+            // namespace conocido (hoy solo "chat_heads"); los targets y sus modos
+            // (reset/replay) se resuelven server-side via
+            // Tier3DemixApply.targetsForNamespace, el caller nunca envia la lista.
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String namespace = p != null && p.get("namespace") instanceof String ? (String) p.get("namespace") : null;
+            if (namespace == null || namespace.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "t3.demixGroupDisable requiere namespace", null));
+                return;
+            }
+            String[] targets = Tier3DemixApply.targetsForNamespace(namespace);
+            if (targets == null) {
+                c.send(err(id, "NAMESPACE_NOT_ELIGIBLE",
+                        "namespace sin grupo registrado para demix atomico: " + namespace, null));
+                return;
+            }
+            // Ruta directa sin gate previo materializado en esta llamada -- se
+            // reclasifica en vivo igual (Tier3DemixApply.disableGroup siempre lo
+            // hace), simplemente sin el chequeo anti-TOCTOU adicional que aplica
+            // cuando el caller SI trae un modo de un gate anterior (ver Ledger.disableOne).
+            Map<String, Object> r = Tier3DemixApply.disableGroup(instrumentation, targets, namespace, null);
+            if (Boolean.FALSE.equals(r.get("ok"))) {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            } else {
+                c.send(res(id, r));
+            }
+        } else if ("t3.demixGroupEnable".equals(method)) {
+            // T3 corte AM: simetrico de t3.demixGroupDisable -- restaura todos los
+            // targets del namespace a sus bytes vivos en una unica llamada atomica.
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String namespace = p != null && p.get("namespace") instanceof String ? (String) p.get("namespace") : null;
+            if (namespace == null || namespace.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "t3.demixGroupEnable requiere namespace", null));
+                return;
+            }
+            String[] targets = Tier3DemixApply.targetsForNamespace(namespace);
+            if (targets == null) {
+                c.send(err(id, "NAMESPACE_NOT_ELIGIBLE",
+                        "namespace sin grupo registrado para demix atomico: " + namespace, null));
+                return;
+            }
+            Map<String, Object> r = Tier3DemixApply.enableGroup(instrumentation, targets, namespace);
+            if (Boolean.FALSE.equals(r.get("ok"))) {
+                String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
+                c.send(err(id, code, String.valueOf(r.get("error")), r));
+            } else {
+                c.send(res(id, r));
+            }
+        } else if ("t3.probeInstance".equals(method)) {
+            // T3 corte AM (fix rendererPools): sondeo de solo lectura -- confirma si
+            // Tier3InstanceLocator alcanza una instancia viva de target antes de
+            // confiar en snapshot/restore de campos vía reflexión.
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String target = p != null && p.get("target") instanceof String ? (String) p.get("target") : null;
+            Map<String, Object> r = Tier3DemixApply.probeInstance(instrumentation, target);
             if (Boolean.FALSE.equals(r.get("ok"))) {
                 String code = r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL";
                 c.send(err(id, code, String.valueOf(r.get("error")), r));

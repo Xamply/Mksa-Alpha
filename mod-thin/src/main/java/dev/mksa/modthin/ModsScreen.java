@@ -45,6 +45,8 @@ public final class ModsScreen extends class_437 {
     private static final int SCROLLBAR_W = 6;
     /** Factor de escala para el texto de las filas — cabe ~17% más de descripción. */
     private static final float TEXT_SCALE = 0.85f;
+    private static final int INFO_LINE_H = 10;
+    private static final int INFO_ICON_SIZE = INFO_LINE_H * 2;
 
     private final class_437 parent;
     private List<BridgeProxy.ModEntry> allEntries = Collections.emptyList();  // sin filtrar (excepto mods/)
@@ -69,7 +71,7 @@ public final class ModsScreen extends class_437 {
     private static boolean showTiers = false;
 
     private class_342 searchBox;
-    private class_4185 upBtn, downBtn, disableBtn, enableBtn, backBtn, refreshBtn, tierToggleBtn;
+    private class_4185 disableBtn, enableBtn, backBtn, refreshBtn, tierToggleBtn;
 
     public ModsScreen(class_437 parent) {
         super(class_2561.method_30163("MKSA · Mods"));
@@ -91,8 +93,7 @@ public final class ModsScreen extends class_437 {
      * podia alcanzarlas.
      */
     private void recomputeVisibleRows() {
-        int available = this.field_22790 - LIST_TOP - BOTTOM_RESERVED;
-        this.visibleRows = Math.max(1, available / ROW_HEIGHT);
+        this.visibleRows = 4;
     }
 
     private void rebuild() {
@@ -109,13 +110,18 @@ public final class ModsScreen extends class_437 {
 
         method_37067();   // clearWidgets
 
-        int listW = (int) (this.field_22789 * 0.65);
-        int sideX = listW + LIST_PAD;
+        int zoneW = (this.field_22789 - 2 * LIST_PAD) / 2;
+        int listW = zoneW;
+        int sideX = LIST_PAD + zoneW + LIST_PAD;
         int sideW = this.field_22789 - sideX - LIST_PAD;
 
         // Search bar (arriba del listado).
+        int topBtnW = 24;
+        int topBtnGap = 4;
+        int topBtnRight = LIST_PAD + listW - LIST_PAD;
+        int topBtnX = topBtnRight - (topBtnW * 2 + topBtnGap);
         this.searchBox = new class_342(this.field_22793,
-                LIST_PAD, SEARCH_Y, listW - 2 * LIST_PAD, SEARCH_H,
+                LIST_PAD, SEARCH_Y, topBtnX - LIST_PAD - 4, SEARCH_H,
                 class_2561.method_30163("Buscar"));
         this.searchBox.method_1852(prevSearch);
         this.searchBox.method_1863(s -> {
@@ -128,16 +134,17 @@ public final class ModsScreen extends class_437 {
         // Filas como botones transparentes — onPress = seleccionar.
         // El ancho clickable termina antes de la scrollbar para no comer su zona.
         int rowsTop = LIST_TOP;
-        int rowCount = Math.min(visibleRows, Math.max(0, entries.size() - scroll));
         int rowW = listW - 2 * LIST_PAD - SCROLLBAR_W - 2;
-        for (int r = 0; r < rowCount; r++) {
+        for (int r = 0; r < visibleRows; r++) {
             final int idx = scroll + r;
             class_4185 row = class_4185.method_46430(
                     class_2561.method_30163(""),
                     b -> {
-                        this.selected = idx;
-                        this.selectedId = entries.get(idx).id;
-                        rebuild();
+                        if (idx < entries.size()) {
+                            this.selected = idx;
+                            this.selectedId = entries.get(idx).id;
+                            rebuild();
+                        }
                     }
             ).method_46434(LIST_PAD, rowsTop + r * ROW_HEIGHT,
                     rowW, ROW_HEIGHT - 2)
@@ -145,24 +152,16 @@ public final class ModsScreen extends class_437 {
             this.method_37063(row);
         }
 
-        // Up / Down / Refresh / Tier-toggle — arriba a la derecha.
-        int navY = LIST_TOP;
-        this.upBtn = class_4185.method_46430(class_2561.method_30163("▲"), b -> { scroll = Math.max(0, scroll - 1); rebuild(); })
-                .method_46434(sideX, navY, 24, 20).method_46431();
-        this.downBtn = class_4185.method_46430(class_2561.method_30163("▼"), b -> {
-                    int max = Math.max(0, entries.size() - visibleRows);
-                    scroll = Math.min(max, scroll + 1); rebuild(); })
-                .method_46434(sideX + 28, navY, 24, 20).method_46431();
+        // Refresh / Tier-toggle — arriba a la derecha, dejando el search recortado.
+        int navY = SEARCH_Y;
         this.refreshBtn = class_4185.method_46430(class_2561.method_30163("⟳"), b -> loadModsAsync())
-                .method_46434(sideX + 56, navY, 24, 20).method_46431();
+                .method_46434(topBtnX, navY, topBtnW, 20).method_46431();
         // Toggle tiers: muestra/oculta los chips T0..T3. Por defecto OFF — chips
         // son ruido para el usuario final; util para diagnostico (power user).
         this.tierToggleBtn = class_4185.method_46430(
                 class_2561.method_30163(showTiers ? "T✓" : "T"),
                 b -> { showTiers = !showTiers; rebuild(); })
-                .method_46434(sideX + 84, navY, 24, 20).method_46431();
-        this.method_37063(this.upBtn);
-        this.method_37063(this.downBtn);
+                .method_46434(topBtnX + topBtnW + topBtnGap, navY, topBtnW, 20).method_46431();
         this.method_37063(this.refreshBtn);
         this.method_37063(this.tierToggleBtn);
 
@@ -170,17 +169,20 @@ public final class ModsScreen extends class_437 {
         boolean disableActive = !busy && sel != null && sel.running && sel.supportedDisable;
         boolean enableActive  = !busy && sel != null && !sel.running && sel.supportedDisable;
 
-        int actY = navY + 32;
+        int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
+        int actY = panelBottom + 6;
+        int actionGap = 6;
+        int actionW = (sideW - actionGap) / 2;
         this.disableBtn = class_4185.method_46430(class_2561.method_30163("Desactivar"), b -> onDisable())
-                .method_46434(sideX, actY, sideW, 22).method_46431();
+                .method_46434(sideX, actY, actionW, 22).method_46431();
         this.disableBtn.field_22763 = disableActive;
 
         this.enableBtn = class_4185.method_46430(class_2561.method_30163("Restaurar"), b -> onEnable())
-                .method_46434(sideX, actY + 26, sideW, 22).method_46431();
+                .method_46434(sideX + actionW + actionGap, actY, sideW - actionW - actionGap, 22).method_46431();
         this.enableBtn.field_22763 = enableActive;
 
         this.backBtn = class_4185.method_46430(class_2561.method_30163("Volver"), b -> this.field_22787.method_1507(parent))
-                .method_46434(sideX, this.field_22790 - 30, sideW, 20).method_46431();
+                .method_46434((this.field_22789 - 100) / 2, this.field_22790 - 30, 100, 20).method_46431();
 
         this.method_37063(this.disableBtn);
         this.method_37063(this.enableBtn);
@@ -198,24 +200,33 @@ public final class ModsScreen extends class_437 {
         String title = "MKSA · Mods  (" + entries.size() + "/" + allEntries.size() + ")";
         ctx.method_25303(this.field_22793, title, LIST_PAD, 12, 0xFFFFFFFF);
 
-        int listW = (int) (this.field_22789 * 0.65);
+        int zoneW = (this.field_22789 - 2 * LIST_PAD) / 2;
+        int listW = zoneW;
         int rowRight = LIST_PAD + listW - 2 * LIST_PAD;
         int scrollbarX = rowRight - SCROLLBAR_W;
         int contentRight = scrollbarX - 4;
+        int sideX = LIST_PAD + zoneW + LIST_PAD;
+        int sideW = this.field_22789 - sideX - LIST_PAD;
+        BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
 
         // Contenido de cada fila (texto + icono encima del fondo del ButtonWidget).
-        int rowCount = Math.min(visibleRows, Math.max(0, entries.size() - scroll));
+        int rowCount = visibleRows;
         for (int r = 0; r < rowCount; r++) {
             int idx = scroll + r;
-            BridgeProxy.ModEntry e = entries.get(idx);
             int y = LIST_TOP + r * ROW_HEIGHT;
 
             // Recuadro de seleccion (sin invadir la zona de scrollbar).
-            if (idx == selected) {
+            if (idx < entries.size() && idx == selected) {
                 ctx.method_25294(LIST_PAD - 1, y - 1,
                         contentRight + 1, y + ROW_HEIGHT - 3 + 1,
                         0x6066AAFF);
             }
+
+            if (idx >= entries.size()) {
+                continue;
+            }
+
+            BridgeProxy.ModEntry e = entries.get(idx);
 
             // Icono 32×32 (centrado verticalmente). Si el agente entrego PNG y
             // decodifica OK, lo registramos en el TextureManager la primera vez
@@ -254,9 +265,8 @@ public final class ModsScreen extends class_437 {
                         0xFFFFFFFF);
             }
 
-            // Texto: name + version arriba, descripcion abajo.
-            // Escalado a TEXT_SCALE: el ancho "lógico" disponible se multiplica
-            // por 1/TEXT_SCALE para que el truncado cuente caracteres correctos.
+            // Texto: nombre arriba, descripcion abajo. La version queda en el
+            // panel derecho.
             int textX = iconX + ICON_SIZE + 8;
             int chipsW = showTiers ? 80 : 36;     // ON/OFF ~28; con T?? ~28+padding
             int textMaxWPx = contentRight - textX - chipsW - 8;
@@ -264,9 +274,7 @@ public final class ModsScreen extends class_437 {
             int textMaxWLogical = (int) (textMaxWPx / TEXT_SCALE);
 
             String name = e.name != null ? e.name : (e.id != null ? e.id : "?");
-            String version = e.version != null ? e.version : "?";
-            String nameVer = name + "  v" + version;
-            String nameVerTrim = this.field_22793.method_27523(nameVer, textMaxWLogical);
+            String nameTrim = this.field_22793.method_27523(name, textMaxWLogical);
             String desc = e.description != null ? e.description : "";
             String descTrim = desc.isEmpty() ? null : this.field_22793.method_27523(desc, textMaxWLogical);
 
@@ -274,7 +282,7 @@ public final class ModsScreen extends class_437 {
             pose.pushMatrix();
             pose.translate(textX, y + 6);
             pose.scale(TEXT_SCALE, TEXT_SCALE);
-            ctx.method_25303(this.field_22793, nameVerTrim, 0, 0, 0xFFFFFFFF);
+            ctx.method_25303(this.field_22793, nameTrim, 0, 0, 0xFFFFFFFF);
             pose.popMatrix();
             if (descTrim != null) {
                 pose.pushMatrix();
@@ -294,6 +302,55 @@ public final class ModsScreen extends class_437 {
                 String tierLabel = e.tier == null ? "T?" : ("T" + e.tier);
                 drawChip(ctx, chipX - 36, chipY, tierLabel, tierColor(e.tier));
             }
+        }
+
+        // Panel derecho: informacion del mod seleccionado.
+        int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
+        ctx.method_25294(sideX, LIST_TOP - 2, sideX + sideW, panelBottom, 0x90000000);
+        ctx.method_25303(this.field_22793, "Informacion del mod", sideX + 8, LIST_TOP + 6, 0xFFFFFFFF);
+
+        if (sel != null) {
+            int infoTop = LIST_TOP + 22;
+            int iconX = sideX + 8;
+            int iconY = infoTop;
+            ModIconCache.Entry icon = ModIconCache.getOrRegister(sel.id, sel.iconPng);
+            if (icon != null) {
+                float fitScale = (float) INFO_ICON_SIZE / Math.max(icon.width, icon.height);
+                int drawW = Math.round(icon.width * fitScale);
+                int drawH = Math.round(icon.height * fitScale);
+                int padX = (INFO_ICON_SIZE - drawW) / 2;
+                int padY = (INFO_ICON_SIZE - drawH) / 2;
+                Matrix3x2fStack iconPose = ctx.method_51448();
+                iconPose.pushMatrix();
+                iconPose.translate(iconX + padX, iconY + padY);
+                iconPose.scale(fitScale, fitScale);
+                ctx.method_25290(class_10799.field_56883, icon.id,
+                        0, 0, 0f, 0f, icon.width, icon.height, icon.width, icon.height);
+                iconPose.popMatrix();
+            } else {
+                int colorBg = placeholderBg(sel.id);
+                ctx.method_25294(iconX, iconY, iconX + INFO_ICON_SIZE, iconY + INFO_ICON_SIZE, colorBg);
+                String initial = initialOf(sel);
+                int tw = this.field_22793.method_1727(initial);
+                ctx.method_25303(this.field_22793, initial,
+                        iconX + (INFO_ICON_SIZE - tw) / 2,
+                        iconY + (INFO_ICON_SIZE - 8) / 2,
+                        0xFFFFFFFF);
+            }
+
+            int infoTextX = sideX + 8 + INFO_ICON_SIZE + 8;
+            int infoTextW = sideW - (INFO_ICON_SIZE + 24);
+            if (infoTextW < 20) infoTextW = 20;
+            String infoName = sel.name != null ? sel.name : (sel.id != null ? sel.id : "?");
+            String infoVersion = sel.version != null ? sel.version : "?";
+            ctx.method_25303(this.field_22793,
+                    this.field_22793.method_27523(infoName, infoTextW),
+                    infoTextX, infoTop + 1, 0xFFFFFFFF);
+            ctx.method_25303(this.field_22793,
+                    this.field_22793.method_27523("v" + infoVersion, infoTextW),
+                    infoTextX, infoTop + INFO_LINE_H + 1, 0xFFB0B0B0);
+        } else {
+            ctx.method_25303(this.field_22793, "Selecciona un mod", sideX + 8, LIST_TOP + 28, 0xFFB0B0B0);
         }
 
         // Scrollbar: aparece solo si hay más mods que caben en visibleRows.
@@ -332,10 +389,8 @@ public final class ModsScreen extends class_437 {
                     LIST_PAD, this.field_22790 - 38, col);
         }
 
-        BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
         if (sel != null && !sel.supportedDisable) {
-            int sideX = listW + LIST_PAD;
-            ctx.method_25303(this.field_22793, "Solo Tier 1 in-process",
+            ctx.method_25303(this.field_22793, "Tier no soportado",
                     sideX, LIST_TOP + 100, 0xFFAAAAAA);
             ctx.method_25303(this.field_22793, "en esta version.",
                     sideX, LIST_TOP + 112, 0xFFAAAAAA);
@@ -505,7 +560,24 @@ public final class ModsScreen extends class_437 {
     private void onDisable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
         if (sel == null || !sel.supportedDisable || !sel.running || busy) return;
-        runAction(sel.id, true);
+        final String ns = sel.id;
+        final String name = sel.name;
+        busy = true; rebuild();
+        final class_310 client = this.field_22787;
+        new Thread(() -> {
+            BridgeProxy.CascadeResult cr = BridgeProxy.cascadeTargets(ns);
+            client.execute(() -> {
+                busy = false;
+                if (!cr.ok || cr.targets.isEmpty()) {
+                    // Camino rapido: sin dependencias huerfanas, comportamiento identico a hoy.
+                    runAction(ns, true);
+                    return;
+                }
+                rebuild();
+                client.method_1507(new CascadeDisableScreen(this, ns, name, cr.targets,
+                        () -> runGroupAction(ns, cr.targets)));
+            });
+        }, "MksaThin-cascade").start();
     }
 
     private void onEnable() {
@@ -654,5 +726,48 @@ public final class ModsScreen extends class_437 {
                 }
             });
         }, "MksaThin-" + verb).start();
+    }
+
+    /**
+     * Desactiva {@code ns} junto con las dependencias huerfanas confirmadas en
+     * {@link CascadeDisableScreen} (§cascade disable), como una sola accion del
+     * jugador. Reactivar sigue siendo por-mod: {@link #runAction} restaura la
+     * raiz y el agente restaura los companeros automaticamente (simetria).
+     */
+    private void runGroupAction(final String ns, final List<BridgeProxy.CascadeTarget> targets) {
+        busy = true; banner = null;
+        rebuild();
+        final class_310 client = this.field_22787;
+        final List<String> nsList = new ArrayList<>();
+        nsList.add(ns);
+        for (BridgeProxy.CascadeTarget t : targets) nsList.add(t.ns);
+        new Thread(() -> {
+            BridgeProxy.ActionResult r = BridgeProxy.disableGroup(nsList);
+            client.execute(() -> {
+                if (r.ok) {
+                    banner = "Desactivar '" + ns + "' + " + targets.size() + " dependencia(s) OK"
+                            + (r.blocks > 0 ? " · " + r.blocks + " bloques" : "")
+                            + (r.chunks > 0 ? " · " + r.chunks + " chunks" : "");
+                    bannerError = false;
+                    new Thread(() -> {
+                        BridgeProxy.ListResult lr = BridgeProxy.listMods();
+                        client.execute(() -> {
+                            busy = false;
+                            if (lr.ok) {
+                                allEntries = filterToMods(lr.mods);
+                                refilter();
+                            }
+                            rebuild();
+                        });
+                    }, "MksaThin-refresh").start();
+                } else {
+                    busy = false;
+                    bannerError = true;
+                    banner = "Desactivar '" + ns + "' + " + targets.size() + " dependencia(s) fallo: "
+                            + (r.error != null ? r.error : (r.code != null ? r.code : "desconocido"));
+                    rebuild();
+                }
+            });
+        }, "MksaThin-cascade-disable").start();
     }
 }

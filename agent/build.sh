@@ -25,7 +25,7 @@ jar cf dist/mksa-bridge.jar -C out-bridge dev
 #    clases del agente ni del bridge (el Bridge se invoca por string en el bytecode).
 javac --release 8 -encoding UTF-8 -cp "lib/*" -d out-ledger \
     $(find src -path '*dev/mksa/agent/ledger/*.java')
-for j in lib/*.jar; do (cd out-ledger && jar xf "../$j"); done
+for j in lib/asm-*.jar; do (cd out-ledger && jar xf "../$j"); done
 rm -rf out-ledger/META-INF   # descartar manifests/firmas de ASM
 jar cf dist/mksa-ledger.jar -C out-ledger .
 
@@ -51,6 +51,9 @@ rm -rf out/META-INF/maven
 # 4) Los dos jars anidados como recurso en la raíz del agent jar.
 cp dist/mksa-bridge.jar out/mksa-bridge.jar
 cp dist/mksa-ledger.jar out/mksa-ledger.jar
+if ls lib/sqlite-jdbc-*.jar >/dev/null 2>&1; then
+    cp "$(ls lib/sqlite-jdbc-*.jar | head -n 1)" out/sqlite-jdbc.jar
+fi
 
 cat > out/MANIFEST.MF <<'EOF'
 Premain-Class: dev.mksa.agent.Agent
@@ -74,6 +77,9 @@ fi
 jar tf dist/fable-agent.jar | grep -q '^mksa-ledger.jar$' || { echo "FALLO: falta mksa-ledger.jar anidado"; exit 1; }
 jar tf dist/fable-agent.jar | grep -q '^mksa-bridge.jar$' || { echo "FALLO: falta mksa-bridge.jar anidado"; exit 1; }
 jar tf dist/mksa-ledger.jar | grep -q '^org/objectweb/asm/ClassReader.class$' || { echo "FALLO: ASM no está en mksa-ledger.jar"; exit 1; }
+if ls lib/sqlite-jdbc-*.jar >/dev/null 2>&1; then
+    jar tf dist/fable-agent.jar | grep -q '^sqlite-jdbc.jar$' || { echo "FALLO: falta sqlite-jdbc.jar anidado"; exit 1; }
+fi
 echo "OK checks"
 
 echo "OK -> $(pwd)/dist/fable-agent.jar"

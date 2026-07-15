@@ -44,6 +44,37 @@ Construido una vez por época, durante la inicialización, interceptando los reg
 - Aristas: `Mod —declara→ Namespace`, `Namespace —posee→ Definición`, `Mod —dependeDe→ Mod` (dura/blanda, del metadata del loader).
 - **Aristas de referencia entre definiciones**: `Receta —usa→ Item`, `LootTable —suelta→ Item`, `Tag —contiene→ Bloque`, `Feature —coloca→ Bloque`, `Bioma —genera→ Feature`. Se extraen parseando los datapacks tras el init. Son las que permiten el preview de cascada fino: *"desactivar Create rompe 14 recetas de Farmer's Delight que usan sus items"* — dependencia real que el metadata del loader no declara.
 
+#### Perfil semántico por mod (lectura derivada)
+
+El explorer/translator puede adjuntar a cada mod un perfil semántico compacto para explicar "qué parece hacer" sin convertir esa explicación en fuente de verdad. El perfil se deriva del Plano A ya construido y de metadata estática del loader; no escribe en `mksa:prov`, no se persiste en SQLite como dato autoritativo y se puede reconstruir en cada arranque.
+
+Forma expuesta por `state.mods` / `modThinListMods`:
+
+```json
+{
+  "semantic": {
+    "focus": "worldgen|mobs|building|data|ui|tech|runtime|mixed",
+    "role": "decorative building variants",
+    "summary": "texto corto para UI",
+    "capabilities": ["bloques", "items", "datos/crafting"],
+    "surfaces": ["registry:block", "datapack:recipes", "runtime hooks"],
+    "riskLabels": ["bloques colocados requieren restore"],
+    "signals": ["blocks: 42", "minecraft:block=mod:example"],
+    "evidenceNotes": ["WCG definitions: blocks=42, items=12"],
+    "counts": { "blocks": 42, "items": 12, "recipes": 8 },
+    "evidence": { "blocks": ["minecraft:block=mod:example"] }
+  }
+}
+```
+
+Contrato de evidencia:
+
+- Permitido: definiciones del WCG agrupadas por namespace y registro, conteos de esas definiciones, metadata del loader (`id`, `name`, `description`, `tier`) y reglas deterministas documentables.
+- Prohibido: inferir comportamiento desde internet, popularidad, descripciones remotas, telemetría no observada, historial de chat o nombres de mods no presentes en el modset.
+- El perfil puede decir "foco probable" o "señales", pero no puede decidir seguridad de desactivación. Las decisiones `auto/ask/blocked/requires_restart` siguen viniendo del `DisablePlan`, no del texto semántico.
+- Las muestras de `evidence` deben ser acotadas. Sirven para explicar por qué se etiquetó un mod, no para transportar el inventario completo de definiciones.
+- La UI puede enriquecer el perfil con impacto dinámico por selección (`modThinDeps`/`wcg.refs`): hard-deps, recetas/tags/loot afectados y owners impactados. Esa consulta es parte del explorer, pero sigue siendo lectura; ejecutar o no ejecutar continúa pasando por `DisablePlan`.
+
 ### Plano B — Runtime (qué hace cada mod en el proceso)
 
 Construido en vivo en cada arranque, interceptando los puntos de suscripción. **No se persiste nunca** — se reconstruye solo.
@@ -223,3 +254,31 @@ Reactivación: consume el archivo en orden inverso con política de conflicto ex
 10. Semántica de desactivación: **eliminar contribuciones actuales + reparar invariantes locales** — nunca replay contrafactual del historial.
 11. La agencia es metadata mínima: a lo sumo un namespace de actor por posición/referencia, último escritor gana, sin historial ni identidad de jugador. El ledger nunca evoluciona hacia un sistema de auditoría.
 12. La observabilidad es solo-escritura, no persistente y apagada por defecto; ningún flujo del sistema lee de ella.
+## Anexo 2026-07-03: Gate transaccional Tier 3 (`t3TxGate`)
+
+Tier 3 no puede pasar de `requires_restart` a `ask`/`auto` solo porque exista soporte de `Instrumentation.redefineClasses`. La decision queda mediada por un gate reconstruible en cada `t3.mixinPlan(ns)` y embebido en `tx.disablePlan(ns)`:
+
+```json
+{
+  "model": "tier3_tx_gate_v1",
+  "decisionContract": "requires_restart_until_all_predicates_true",
+  "canLowerDecision": false,
+  "eligibleDecisionWhenViable": "ask",
+  "autoEligible": false,
+  "receiptRequired": true,
+  "receiptModel": "tier3_demix_tx_receipt_v1",
+  "rollbackRequired": true,
+  "rollbackAvailable": false,
+  "rollbackMechanismAvailable": true,
+  "redefineSupported": true,
+  "baseBytesCaptured": true,
+  "demixSafeToExecute": false,
+  "demixExecutable": false,
+  "runtimeMixinOrderTrusted": false,
+  "transformerQuiescenceVerified": false,
+  "txImplementationReady": false,
+  "blockers": [{ "code": "demix_not_executable", "detail": "..." }]
+}
+```
+
+Regla dura: `DisablePlan` solo puede bajar Tier 3 a `ask` o `auto` si `canLowerDecision=true`. Para que eso ocurra deben estar cubiertos como minimo: bytecode base completo, soporte de redefine, plan de demix `safeToExecute`/`executable`, orden runtime real de Mixin verificado, quiescencia de transformers, aplicador transaccional disponible, receipt `tier3_demix_tx_receipt_v1` y rollback real disponible. Mientras cualquiera falte, `tx.disablePlan` conserva `decision=requires_restart`, y `tx.disable` debe fallar cerrado con `TIER3_DEMIX_NOT_EXECUTABLE` si se invoca directamente.

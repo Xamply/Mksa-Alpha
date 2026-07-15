@@ -16,6 +16,12 @@ pub struct ResolvedJava {
     /// Ejecutable con el que se lanza el juego (javaw en Windows: sin consola).
     pub launch_exe: PathBuf,
     pub major: i64,
+    /// true solo cuando esta JVM vino de `ensure_jbr()` (el JBR21 gestionado
+    /// por MKSA) -- nunca por heuristica de version. launch.rs se apoya en
+    /// este flag, y no en `major`, para decidir si es seguro agregar
+    /// `-XX:+AllowEnhancedClassRedefinition` (una JVM estandar no reconoce
+    /// esa flag y aborta el arranque si se le pasa).
+    pub is_jbr: bool,
 }
 
 // JBR fijado para la descarga silenciosa. Subir de versión = cambiar estas
@@ -31,6 +37,35 @@ pub fn resolve(
     required_majors: &[i64],
     progress: &dyn Fn(&str),
 ) -> Result<ResolvedJava, String> {
+    // Fase 8: JVM forzada explícitamente por variable de entorno, para el
+    // harness de verificación (ej. probar JBR21 + AllowEnhancedClassRedefinition
+    // sin editar el JavaPath de instance.cfg). Se saltea el filtro de
+    // required_majors a propósito -- es una JVM elegida a mano, no una
+    // candidata más a filtrar. Solo lo usa el harness; el launcher de
+    // producción nunca define esta variable.
+    if let Ok(forced) = std::env::var("MKSA_JAVA_PATH") {
+        let cand = PathBuf::from(&forced);
+        if cand.is_file() {
+            let major = probe_major(&cand).unwrap_or(0);
+            return Ok(ResolvedJava {
+                launch_exe: cand,
+                major,
+                is_jbr: false,
+            });
+        }
+    }
+
+    // Fase 9: JBR21 es la JVM dedicada de MKSA para todo lanzamiento real que
+    // requiera Java 21 (el unico caso real de este proyecto, Minecraft
+    // 1.21.x) -- gana siempre, por encima de instance.cfg/JAVA_HOME/rutas
+    // estandar, decision explicita del usuario tras confirmar en corte Z que
+    // JBR21 resetea a base bytecode Mixin real. Para cualquier otro major
+    // requerido (o fuera de Windows), el flujo de candidatos de abajo sigue
+    // intacto -- JBR no cubre esos casos.
+    if cfg!(windows) && required_majors.contains(&JBR_MAJOR) {
+        return ensure_jbr(progress);
+    }
+
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(p) = instance_java {
@@ -51,12 +86,12 @@ pub fn resolve(
             continue;
         };
         if required_majors.is_empty() || required_majors.contains(&major) {
-            return Ok(ResolvedJava { launch_exe: cand, major });
+            return Ok(ResolvedJava {
+                launch_exe: cand,
+                major,
+                is_jbr: false,
+            });
         }
-    }
-
-    if cfg!(windows) && required_majors.contains(&JBR_MAJOR) {
-        return ensure_jbr(progress);
     }
 
     Err(format!(
@@ -71,10 +106,16 @@ pub fn resolve(
 /// de staging y renombra al final: una descarga interrumpida nunca deja un
 /// JBR a medias que parezca válido.
 pub fn ensure_jbr(progress: &dyn Fn(&str)) -> Result<ResolvedJava, String> {
-    let jbr_root = crate::meta::mksa_cache_root().join("jbr").join(JBR_DIR_NAME);
+    let jbr_root = crate::meta::mksa_cache_root()
+        .join("jbr")
+        .join(JBR_DIR_NAME);
     let launch_exe = jbr_root.join("bin").join(exe_name());
     if launch_exe.is_file() {
-        return Ok(ResolvedJava { launch_exe, major: JBR_MAJOR });
+        return Ok(ResolvedJava {
+            launch_exe,
+            major: JBR_MAJOR,
+            is_jbr: true,
+        });
     }
 
     let parent = jbr_root.parent().unwrap().to_path_buf();
@@ -83,7 +124,9 @@ pub fn ensure_jbr(progress: &dyn Fn(&str)) -> Result<ResolvedJava, String> {
     let staging = parent.join(format!("{JBR_DIR_NAME}.staging"));
     let _ = std::fs::remove_dir_all(&staging);
 
-    progress(&format!("descargando JBR {JBR_MAJOR} (~45 MB, solo la primera vez)"));
+    progress(&format!(
+        "descargando JBR {JBR_MAJOR} (~45 MB, solo la primera vez)"
+    ));
     download_with_sha512(JBR_URL, &tgz_path, JBR_SHA512, progress)?;
 
     progress("extrayendo JBR");
@@ -112,7 +155,11 @@ pub fn ensure_jbr(progress: &dyn Fn(&str)) -> Result<ResolvedJava, String> {
         return Err("JBR extraído pero sin el ejecutable esperado".into());
     }
     progress(&format!("JBR {JBR_MAJOR} listo"));
-    Ok(ResolvedJava { launch_exe, major: JBR_MAJOR })
+    Ok(ResolvedJava {
+        launch_exe,
+        major: JBR_MAJOR,
+        is_jbr: true,
+    })
 }
 
 fn download_with_sha512(
@@ -136,7 +183,9 @@ fn download_with_sha512(
     let mut done: u64 = 0;
     let mut last_pct = 0;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("descargando JBR: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("descargando JBR: {e}"))?;
         if n == 0 {
             break;
         }
@@ -154,13 +203,19 @@ fn download_with_sha512(
     let got = format!("{:x}", hasher.finalize());
     if got != expected {
         let _ = std::fs::remove_file(dest);
-        return Err(format!("sha512 de JBR no coincide (esperado {expected}, obtenido {got})"));
+        return Err(format!(
+            "sha512 de JBR no coincide (esperado {expected}, obtenido {got})"
+        ));
     }
     Ok(())
 }
 
 fn exe_name() -> &'static str {
-    if cfg!(windows) { "javaw.exe" } else { "java" }
+    if cfg!(windows) {
+        "javaw.exe"
+    } else {
+        "java"
+    }
 }
 
 fn standard_locations() -> Vec<PathBuf> {
@@ -221,11 +276,17 @@ fn probe_major(java: &Path) -> Option<i64> {
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let out = cmd.output().ok()?;
-    let text = String::from_utf8_lossy(&out.stderr).to_string()
-        + &String::from_utf8_lossy(&out.stdout);
+    let text =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     // formato: openjdk version "21.0.7" / java version "1.8.0_392"
     let quoted = text.split('"').nth(1)?;
-    let mut nums = quoted.split(['.', '_', '-']).filter_map(|s| s.parse::<i64>().ok());
+    let mut nums = quoted
+        .split(['.', '_', '-'])
+        .filter_map(|s| s.parse::<i64>().ok());
     let first = nums.next()?;
-    Some(if first == 1 { nums.next().unwrap_or(8) } else { first })
+    Some(if first == 1 {
+        nums.next().unwrap_or(8)
+    } else {
+        first
+    })
 }

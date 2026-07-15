@@ -39,7 +39,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Games::default())
-        .invoke_handler(tauri::generate_handler![scan_instances, launch_instance, relaunch_disable])
+        .invoke_handler(tauri::generate_handler![
+            scan_instances,
+            launch_instance,
+            relaunch_disable
+        ])
         .run(tauri::generate_context!())
         .expect("error al arrancar la aplicación");
 }

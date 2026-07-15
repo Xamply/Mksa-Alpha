@@ -137,6 +137,42 @@ public final class LedgerTransformer implements ClassFileTransformer {
             "net/minecraft/tags/TagLoader",                               // por si MC mueve
     };
 
+    /** CreativeModeTab (pestaña de inventario creativo) por familia. (corte tabs, Paso A) */
+    private static final String[] CREATIVE_MODE_TAB_CLASSES = {
+            "net/minecraft/class_1761",                                   // intermediary
+            "net/minecraft/world/item/CreativeModeTab",                   // mojmap
+    };
+
+    /** CreativeModeTab$ItemDisplayBuilder (Output.accept, punto canónico de población) por familia. (corte tabs, Paso B) */
+    private static final String[] CREATIVE_TAB_OUTPUT_CLASSES = {
+            "net/minecraft/class_1761$class_7703",                          // intermediary
+            "net/minecraft/world/item/CreativeModeTab$ItemDisplayBuilder",  // mojmap
+    };
+
+    /** CreativeModeTab$ItemDisplayParameters (contexto de buildContents) por familia. (corte tabs, Paso A) */
+    private static final String[] ITEM_DISPLAY_PARAMETERS_CLASSES = {
+            "net/minecraft/class_1761$class_8128",                            // intermediary
+            "net/minecraft/world/item/CreativeModeTab$ItemDisplayParameters", // mojmap
+    };
+
+    /** ItemStack por familia de nombres. (corte tabs) */
+    private static final String[] ITEM_STACK_CLASSES = {
+            "net/minecraft/class_1799",                                   // intermediary
+            "net/minecraft/world/item/ItemStack",                         // mojmap
+    };
+
+    private static final String[] FABRIC_EVENT_CLASSES = {
+            "net/fabricmc/fabric/impl/base/event/ArrayBackedEvent",
+    };
+
+    private static final String[] FABRIC_GLOBAL_RECEIVER_CLASSES = {
+            "net/fabricmc/fabric/impl/networking/GlobalReceiverRegistry",
+    };
+
+    private static final String[] FABRIC_NETWORK_ADDON_CLASSES = {
+            "net/fabricmc/fabric/impl/networking/AbstractNetworkAddon",
+    };
+
     /**
      * Sinks de E/S del JDK que distinguen writeCompressed (gzip a disco) del
      * write(CompoundTag, DataOutput) sin comprimir del RegionFile. Son tipos del
@@ -165,8 +201,15 @@ public final class LedgerTransformer implements ClassFileTransformer {
         boolean tagValueInput = isTagValueInput(className);
         boolean recipeManager = isRecipeManager(className);
         boolean tagManagerLoader = isTagManagerLoader(className);
+        boolean fabricEvent = isFabricEvent(className);
+        boolean fabricGlobalReceiver = isFabricGlobalReceiver(className);
+        boolean fabricNetworkAddon = isFabricNetworkAddon(className);
+        boolean creativeModeTab = isCreativeModeTab(className);
+        boolean creativeTabOutput = isCreativeTabOutput(className);
         if (!chunkData && !levelChunk && !nbtIo && !tagValueInput
-                && !recipeManager && !tagManagerLoader) return null;
+                && !recipeManager && !tagManagerLoader && !fabricEvent
+                && !fabricGlobalReceiver && !fabricNetworkAddon
+                && !creativeModeTab && !creativeTabOutput) return null;
         try {
             ClassReader cr = new ClassReader(classfileBuffer);
             ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
@@ -175,7 +218,12 @@ public final class LedgerTransformer implements ClassFileTransformer {
                     : nbtIo ? new NbtIoVisitor(cw)
                     : tagValueInput ? new TagValueInputVisitor(cw)
                     : recipeManager ? new RecipeManagerVisitor(cw)
-                    : new TagManagerLoaderVisitor(cw);
+                    : tagManagerLoader ? new TagManagerLoaderVisitor(cw)
+                    : fabricEvent ? new FabricEventVisitor(cw)
+                    : fabricGlobalReceiver ? new FabricGlobalReceiverVisitor(cw)
+                    : fabricNetworkAddon ? new FabricNetworkAddonVisitor(cw)
+                    : creativeModeTab ? new CreativeModeTabVisitor(cw)
+                    : new CreativeTabOutputVisitor(cw);
             cr.accept(v, 0);
             System.err.println("[mksa] ledger: instrumentado " + className);
             return cw.toByteArray();
@@ -212,6 +260,31 @@ public final class LedgerTransformer implements ClassFileTransformer {
 
     private static boolean isTagManagerLoader(String internalName) {
         for (String c : TAG_MANAGER_LOADER_CLASSES) if (c.equals(internalName)) return true;
+        return false;
+    }
+
+    private static boolean isFabricEvent(String internalName) {
+        for (String c : FABRIC_EVENT_CLASSES) if (c.equals(internalName)) return true;
+        return false;
+    }
+
+    private static boolean isFabricGlobalReceiver(String internalName) {
+        for (String c : FABRIC_GLOBAL_RECEIVER_CLASSES) if (c.equals(internalName)) return true;
+        return false;
+    }
+
+    private static boolean isFabricNetworkAddon(String internalName) {
+        for (String c : FABRIC_NETWORK_ADDON_CLASSES) if (c.equals(internalName)) return true;
+        return false;
+    }
+
+    private static boolean isCreativeModeTab(String internalName) {
+        for (String c : CREATIVE_MODE_TAB_CLASSES) if (c.equals(internalName)) return true;
+        return false;
+    }
+
+    private static boolean isCreativeTabOutput(String internalName) {
+        for (String c : CREATIVE_TAB_OUTPUT_CLASSES) if (c.equals(internalName)) return true;
         return false;
     }
 
@@ -654,6 +727,255 @@ public final class LedgerTransformer implements ClassFileTransformer {
             super.visitVarInsn(Opcodes.ALOAD, 1); // slot 0 = this; el Map es slot 1
             super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "dpFilterTagBuild",
                     "(Ljava/lang/Object;)V", false);
+        }
+    }
+
+    // ====================== Tier 2: runtime plane (Fabric) ======================
+
+    private static final class FabricEventVisitor extends ClassVisitor {
+        FabricEventVisitor(ClassVisitor cv) { super(Opcodes.ASM9, cv); }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+            boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+            if (isStatic) return mv;
+            if (!"register".equals(name)) return mv;
+            if (Type.getReturnType(descriptor).getSort() != Type.VOID) return mv;
+            Type[] args = Type.getArgumentTypes(descriptor);
+            if (args.length != 2) return mv;
+            if (args[args.length - 1].getSort() != Type.OBJECT) return mv;
+            int listenerSlot = 1;
+            for (int i = 0; i < args.length - 1; i++) listenerSlot += args[i].getSize();
+            int phaseSlot = args.length == 2 ? 1 : 0;
+            System.err.println("[mksa] ledger: inyectando FabricEventRegisterHook en " + name + descriptor);
+            return new FabricEventRegisterHookVisitor(mv, phaseSlot, listenerSlot);
+        }
+    }
+
+    private static final class FabricEventRegisterHookVisitor extends MethodVisitor {
+        private final int phaseSlot;
+        private final int listenerSlot;
+        FabricEventRegisterHookVisitor(MethodVisitor mv, int phaseSlot, int listenerSlot) {
+            super(Opcodes.ASM9, mv);
+            this.phaseSlot = phaseSlot;
+            this.listenerSlot = listenerSlot;
+        }
+
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            super.visitLdcInsn("fabric-event");
+            super.visitVarInsn(Opcodes.ALOAD, 0);
+            if (phaseSlot > 0) super.visitVarInsn(Opcodes.ALOAD, phaseSlot);
+            else super.visitInsn(Opcodes.ACONST_NULL);
+            super.visitVarInsn(Opcodes.ALOAD, listenerSlot);
+            super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "runtimeSubscribe",
+                    "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V", false);
+        }
+    }
+
+    /**
+     * Fabric networking global receivers. The public API delegates to
+     * GlobalReceiverRegistry.registerGlobalReceiver(Identifier, handler), and the
+     * registry also exposes unregisterGlobalReceiver(Identifier). That gives us the
+     * same reversible shape as ArrayBackedEvent: keep the registry, channel id and
+     * handler object, then remove/restore through Fabric's own implementation.
+     */
+    private static final class FabricGlobalReceiverVisitor extends ClassVisitor {
+        FabricGlobalReceiverVisitor(ClassVisitor cv) { super(Opcodes.ASM9, cv); }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+            boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+            if (isStatic) return mv;
+            if (!"registerGlobalReceiver".equals(name)) return mv;
+            if (Type.getReturnType(descriptor).getSort() != Type.BOOLEAN) return mv;
+            Type[] args = Type.getArgumentTypes(descriptor);
+            if (args.length != 2) return mv;
+            if (args[0].getSort() != Type.OBJECT || args[1].getSort() != Type.OBJECT) return mv;
+            System.err.println("[mksa] ledger: inyectando FabricGlobalReceiverHook en " + name + descriptor);
+            return new FabricGlobalReceiverHookVisitor(mv);
+        }
+    }
+
+    private static final class FabricGlobalReceiverHookVisitor extends MethodVisitor {
+        FabricGlobalReceiverHookVisitor(MethodVisitor mv) { super(Opcodes.ASM9, mv); }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode == Opcodes.IRETURN) {
+                Label skip = new Label();
+                super.visitInsn(Opcodes.DUP);                 // [ok, ok]
+                super.visitJumpInsn(Opcodes.IFEQ, skip);      // [ok]
+                super.visitLdcInsn("fabric-networking-global");
+                super.visitVarInsn(Opcodes.ALOAD, 0);         // GlobalReceiverRegistry
+                super.visitVarInsn(Opcodes.ALOAD, 1);         // Identifier channel
+                super.visitVarInsn(Opcodes.ALOAD, 2);         // handler
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "runtimeSubscribe",
+                        "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V", false);
+                super.visitLabel(skip);
+                super.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { Opcodes.INTEGER });
+            }
+            super.visitInsn(opcode);
+        }
+    }
+
+    /**
+     * Fabric per-connection receivers. ClientPlayNetworking.registerReceiver and
+     * the server/configuration variants delegate to AbstractNetworkAddon.registerChannel
+     * on the live connection addon. The matching unregisterChannel returns the
+     * removed handler, so this is reversible while that connection remains alive.
+     */
+    private static final class FabricNetworkAddonVisitor extends ClassVisitor {
+        FabricNetworkAddonVisitor(ClassVisitor cv) { super(Opcodes.ASM9, cv); }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+            boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+            if (isStatic) return mv;
+            if (!"registerChannel".equals(name)) return mv;
+            if (Type.getReturnType(descriptor).getSort() != Type.BOOLEAN) return mv;
+            Type[] args = Type.getArgumentTypes(descriptor);
+            if (args.length != 2) return mv;
+            if (args[0].getSort() != Type.OBJECT || args[1].getSort() != Type.OBJECT) return mv;
+            System.err.println("[mksa] ledger: inyectando FabricNetworkAddonRegisterHook en " + name + descriptor);
+            return new FabricNetworkAddonRegisterHookVisitor(mv);
+        }
+    }
+
+    private static final class FabricNetworkAddonRegisterHookVisitor extends MethodVisitor {
+        FabricNetworkAddonRegisterHookVisitor(MethodVisitor mv) { super(Opcodes.ASM9, mv); }
+
+        @Override
+        public void visitInsn(int opcode) {
+            if (opcode == Opcodes.IRETURN) {
+                Label skip = new Label();
+                super.visitInsn(Opcodes.DUP);                 // [ok, ok]
+                super.visitJumpInsn(Opcodes.IFEQ, skip);      // [ok]
+                super.visitLdcInsn("fabric-networking-connection");
+                super.visitVarInsn(Opcodes.ALOAD, 0);         // AbstractNetworkAddon
+                super.visitVarInsn(Opcodes.ALOAD, 1);         // Identifier channel
+                super.visitVarInsn(Opcodes.ALOAD, 2);         // handler
+                super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "runtimeSubscribe",
+                        "(Ljava/lang/String;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V", false);
+                super.visitLabel(skip);
+                super.visitFrame(Opcodes.F_SAME1, 0, null, 1, new Object[] { Opcodes.INTEGER });
+            }
+            super.visitInsn(opcode);
+        }
+    }
+
+    // ====================== corte tabs: toggle de pestaña de inventario creativo ======================
+    //
+    // Dos superficies de CreativeModeTab (class_1761):
+    //   - CreativeModeTab.buildContents(ItemDisplayParameters): captura pasiva (Paso A)
+    //     del contexto real, para poder forzar un rebuild reflectivo más tarde.
+    //   - CreativeModeTab$ItemDisplayBuilder.accept(ItemStack, TabVisibility): el único
+    //     punto por el que pasa CUALQUIER item de CUALQUIER mod al entrar a CUALQUIER
+    //     pestaña (confirmado por javap: único método no-constructor de la clase). Vetar
+    //     ahí basta para vaciar la pestaña; vainilla ya oculta el botón de una pestaña
+    //     CATEGORY vacía (shouldDisplay()→hasStacks()), así que no hace falta tocar
+    //     Registries.ITEM_GROUP ni la GUI. Patrón filter, no des-registrar (§3.1).
+
+    /**
+     * Visita CreativeModeTab. Engancha buildContents(ItemDisplayParameters): instance,
+     * 1 parámetro cuyo tipo está en ITEM_DISPLAY_PARAMETERS_CLASSES, devuelve void.
+     * Única firma con esa forma.
+     */
+    private static final class CreativeModeTabVisitor extends ClassVisitor {
+        CreativeModeTabVisitor(ClassVisitor cv) { super(Opcodes.ASM9, cv); }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+            boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+            if (isStatic) return mv;
+            if (Type.getReturnType(descriptor).getSort() != Type.VOID) return mv;
+            Type[] args = Type.getArgumentTypes(descriptor);
+            if (args.length != 1) return mv;
+            if (args[0].getSort() != Type.OBJECT
+                    || !isOneOf(ITEM_DISPLAY_PARAMETERS_CLASSES, args[0].getInternalName())) return mv;
+            System.err.println("[mksa] ledger: inyectando TabBuildContentsHook en " + name + descriptor);
+            return new TabBuildContentsHookVisitor(mv);
+        }
+    }
+
+    /**
+     * Inyecta Bridge.captureTabDisplayParams(params) a la entrada del método. Paso A,
+     * captura pasiva sin branching → sin frame nuevo requerido.
+     */
+    private static final class TabBuildContentsHookVisitor extends MethodVisitor {
+        TabBuildContentsHookVisitor(MethodVisitor mv) { super(Opcodes.ASM9, mv); }
+
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            super.visitVarInsn(Opcodes.ALOAD, 1); // slot 0 = this; ItemDisplayParameters es slot 1
+            super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "captureTabDisplayParams",
+                    "(Ljava/lang/Object;)V", false);
+        }
+    }
+
+    /**
+     * Visita CreativeModeTab$ItemDisplayBuilder. Engancha accept(ItemStack,
+     * TabVisibility): instance, 2 parámetros, el primero ItemStack, devuelve void —
+     * el único método no-constructor de la clase (confirmado por javap), sin
+     * ambigüedad estructural.
+     */
+    private static final class CreativeTabOutputVisitor extends ClassVisitor {
+        CreativeTabOutputVisitor(ClassVisitor cv) { super(Opcodes.ASM9, cv); }
+
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
+            boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
+            if (isStatic) return mv;
+            if (Type.getReturnType(descriptor).getSort() != Type.VOID) return mv;
+            Type[] args = Type.getArgumentTypes(descriptor);
+            if (args.length != 2) return mv;
+            if (args[0].getSort() != Type.OBJECT
+                    || !isOneOf(ITEM_STACK_CLASSES, args[0].getInternalName())) return mv;
+            System.err.println("[mksa] ledger: inyectando TabItemVetoHook en " + name + descriptor);
+            return new TabItemVetoHookVisitor(mv);
+        }
+    }
+
+    /**
+     * Inyecta el veto al entry de accept(ItemStack, TabVisibility):
+     * <pre>
+     *   ALOAD itemStack
+     *   INVOKESTATIC Bridge.shouldVetoTabItem(Object): boolean
+     *   IFEQ skipVeto
+     *   RETURN
+     *   skipVeto:
+     * </pre>
+     * A diferencia del veto de setBlockState (devuelve BlockState, necesita
+     * ACONST_NULL antes de ARETURN), este método es void: el corto-circuito es un
+     * RETURN simple. Introduce un branch target nuevo → requiere visitFrame manual
+     * (mismo motivo que SetBlockHookVisitor; COMPUTE_MAXS no calcula frames).
+     */
+    private static final class TabItemVetoHookVisitor extends MethodVisitor {
+        TabItemVetoHookVisitor(MethodVisitor mv) { super(Opcodes.ASM9, mv); }
+
+        @Override
+        public void visitCode() {
+            super.visitCode();
+            Label skipVeto = new Label();
+            super.visitVarInsn(Opcodes.ALOAD, 1); // slot 0 = this; el ItemStack es slot 1
+            super.visitMethodInsn(Opcodes.INVOKESTATIC, BRIDGE, "shouldVetoTabItem",
+                    "(Ljava/lang/Object;)Z", false);
+            super.visitJumpInsn(Opcodes.IFEQ, skipVeto);
+            super.visitInsn(Opcodes.RETURN);
+            super.visitLabel(skipVeto);
+            super.visitFrame(Opcodes.F_SAME, 0, null, 0, null);
         }
     }
 }

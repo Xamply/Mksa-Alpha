@@ -12,6 +12,12 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 
 /**
  * Motor de mutación in-process (corte 1, proyecto §3.5) — el de-risk del end-goal.
@@ -2569,6 +2575,14 @@ public final class InProcess {
     private volatile long refsLootScanned;
     private volatile long refsIndexBuiltMs;
     private volatile long refsIndexEpoch = Long.MIN_VALUE;
+    private volatile String refsIndexSource = "none";     // memory | sqlite | rebuild
+    private volatile long refsSqliteLoadedRows;
+    private volatile long refsSqliteSavedRows;
+    private volatile boolean refsSqliteDriver;
+    private volatile boolean refsSqliteHit;
+    private volatile boolean refsSqliteMiss;
+    private volatile String refsSqlitePath = "";
+    private volatile String refsSqliteError = "";
 
     /**
      * Query invertida de cascada (F4 / {@code wcg.refs}). Construye (lazy) el índice invertido
@@ -2606,8 +2620,12 @@ public final class InProcess {
             ((Executor) candidate).execute(new Runnable() {
                 public void run() {
                     try {
-                        if (rebuild) refsIndex = null;
-                        boolean reused = ensureRefsIndex();
+                        if (rebuild) {
+                            refsIndex = null;
+                            refsIndexEpoch = Long.MIN_VALUE;
+                            refsIndexSource = "rebuild-request";
+                        }
+                        boolean reused = ensureRefsIndex(!rebuild);
                         queryRefs(ns, reused, holder);
                     } catch (Throwable t) {
                         holder.put("error", String.valueOf(rootCause(t)));
@@ -2642,10 +2660,39 @@ public final class InProcess {
      * Construye el índice invertido si falta o si el epoch cambió. Corre EN el hilo del
      * servidor. Devuelve {@code true} si reusó el caché vigente, {@code false} si reconstruyó.
      */
-    private boolean ensureRefsIndex() throws Exception {
+    private boolean ensureRefsIndex(boolean allowSqliteLoad) throws Exception {
         long epoch = Ledger.INSTANCE.epoch();
         Map<String, java.util.List<RefEdge>> idx = refsIndex;
-        if (idx != null && refsIndexEpoch == epoch) return true;
+        if (idx != null && refsIndexEpoch == epoch) {
+            refsIndexSource = "memory";
+            return true;
+        }
+
+        refsSqliteHit = false;
+        refsSqliteMiss = false;
+        refsSqliteLoadedRows = 0;
+        refsSqliteSavedRows = 0;
+        refsSqliteError = "";
+        if (allowSqliteLoad) {
+            RefsIndexSnapshot snap = RefsSqliteStore.load(epoch);
+            refsSqliteDriver = snap.driverAvailable;
+            refsSqlitePath = snap.path;
+            refsSqliteError = snap.error;
+            if (snap.ok) {
+                refsIndex = snap.index;
+                refsTagMembers = snap.tagMembers;
+                refsIndexScanned = snap.recipeScanned;
+                refsLootScanned = snap.lootScanned;
+                refsIndexBuiltMs = 0;
+                refsIndexEpoch = epoch;
+                refsSqliteLoadedRows = snap.edgeRows + snap.tagRows;
+                refsSqliteHit = true;
+                refsSqliteMiss = false;
+                refsIndexSource = "sqlite";
+                return false;
+            }
+            refsSqliteMiss = snap.driverAvailable;
+        }
 
         long t0 = System.currentTimeMillis();
         Method getRm = resolveGetRecipeManager();
@@ -2739,7 +2786,274 @@ public final class InProcess {
         refsLootScanned = lootScanned;
         refsIndexBuiltMs = System.currentTimeMillis() - t0;
         refsIndexEpoch = epoch;
+        refsIndexSource = "rebuild";
+        RefsIndexSnapshot snap = new RefsIndexSnapshot();
+        snap.index = built;
+        snap.tagMembers = tagMembers;
+        snap.epoch = epoch;
+        snap.recipeScanned = scanned;
+        snap.lootScanned = lootScanned;
+        snap.builtMs = refsIndexBuiltMs;
+        RefsSqliteStore.SaveResult sr = RefsSqliteStore.save(snap);
+        refsSqliteDriver = sr.driverAvailable;
+        refsSqlitePath = sr.path;
+        refsSqliteSavedRows = sr.rows;
+        refsSqliteError = sr.error;
+        refsSqliteHit = false;
         return false;
+    }
+
+    private static final class RefsIndexSnapshot {
+        long epoch;
+        Map<String, java.util.List<RefEdge>> index = new HashMap<String, java.util.List<RefEdge>>();
+        Map<String, java.util.Set<String>> tagMembers = new HashMap<String, java.util.Set<String>>();
+        long recipeScanned;
+        long lootScanned;
+        long builtMs;
+        long edgeRows;
+        long tagRows;
+        boolean ok;
+        boolean driverAvailable;
+        String path = "";
+        String error = "";
+    }
+
+    /**
+     * SQLite cache rebuildable para wcg.refs. No es fuente de verdad: si falta el
+     * driver, el archivo o cualquier lectura falla, el índice se reconstruye desde
+     * los registros vivos y se intenta guardar otra vez. El driver vive en el
+     * fable-agent.jar como org.sqlite.JDBC; Java no trae SQLite en stdlib.
+     */
+    private static final class RefsSqliteStore {
+        private static final int SCHEMA = 1;
+        private static volatile boolean driverChecked;
+        private static volatile boolean driverAvailable;
+        private static volatile String driverError = "";
+
+        static final class SaveResult {
+            boolean driverAvailable;
+            String path = "";
+            String error = "";
+            long rows;
+        }
+
+        static RefsIndexSnapshot load(long epoch) {
+            RefsIndexSnapshot out = new RefsIndexSnapshot();
+            out.epoch = epoch;
+            out.path = dbPath();
+            if (out.path.length() == 0) { out.error = "mksa.dir no listo"; return out; }
+            if (!ensureDriver()) {
+                out.driverAvailable = false;
+                out.error = driverError;
+                return out;
+            }
+            out.driverAvailable = true;
+            Connection c = null;
+            try {
+                c = DriverManager.getConnection("jdbc:sqlite:" + out.path);
+                ensureSchema(c);
+                PreparedStatement count = c.prepareStatement(
+                        "SELECT COUNT(*) FROM refs_edges WHERE epoch=?");
+                count.setLong(1, epoch);
+                ResultSet cr = count.executeQuery();
+                long rows = cr.next() ? cr.getLong(1) : 0;
+                closeQuiet(cr); closeQuiet(count);
+                if (rows <= 0) { out.error = "miss"; return out; }
+
+                PreparedStatement meta = c.prepareStatement(
+                        "SELECT recipe_scanned, loot_scanned, built_ms FROM refs_meta WHERE epoch=?");
+                meta.setLong(1, epoch);
+                ResultSet mr = meta.executeQuery();
+                if (mr.next()) {
+                    out.recipeScanned = mr.getLong(1);
+                    out.lootScanned = mr.getLong(2);
+                    out.builtMs = mr.getLong(3);
+                }
+                closeQuiet(mr); closeQuiet(meta);
+
+                PreparedStatement edges = c.prepareStatement(
+                        "SELECT dst_id, src_id, src_owner, kind, tag FROM refs_edges WHERE epoch=?");
+                edges.setLong(1, epoch);
+                ResultSet er = edges.executeQuery();
+                while (er.next()) {
+                    String dst = er.getString(1);
+                    String src = er.getString(2);
+                    String owner = er.getString(3);
+                    int kind = er.getInt(4);
+                    String tag = er.getString(5);
+                    addRefEdge(out.index, dst, new RefEdge(src, owner, kind, tag));
+                    out.edgeRows++;
+                }
+                closeQuiet(er); closeQuiet(edges);
+
+                PreparedStatement tags = c.prepareStatement(
+                        "SELECT tag_id, item_id FROM refs_tag_members WHERE epoch=?");
+                tags.setLong(1, epoch);
+                ResultSet tr = tags.executeQuery();
+                while (tr.next()) {
+                    addToSet(out.tagMembers, tr.getString(1), tr.getString(2));
+                    out.tagRows++;
+                }
+                closeQuiet(tr); closeQuiet(tags);
+                out.ok = true;
+                return out;
+            } catch (Throwable t) {
+                out.error = t.getClass().getSimpleName() + ": " + t.getMessage();
+                return out;
+            } finally {
+                closeQuiet(c);
+            }
+        }
+
+        static SaveResult save(RefsIndexSnapshot snap) {
+            SaveResult out = new SaveResult();
+            out.path = dbPath();
+            if (out.path.length() == 0) { out.error = "mksa.dir no listo"; return out; }
+            if (!ensureDriver()) {
+                out.driverAvailable = false;
+                out.error = driverError;
+                return out;
+            }
+            out.driverAvailable = true;
+            Connection c = null;
+            try {
+                java.io.File f = new java.io.File(out.path);
+                java.io.File parent = f.getParentFile();
+                if (parent != null) parent.mkdirs();
+                c = DriverManager.getConnection("jdbc:sqlite:" + out.path);
+                ensureSchema(c);
+                c.setAutoCommit(false);
+                deleteEpoch(c, snap.epoch);
+
+                PreparedStatement meta = c.prepareStatement(
+                        "INSERT OR REPLACE INTO refs_meta(epoch, recipe_scanned, loot_scanned, built_ms, saved_at) VALUES(?,?,?,?,?)");
+                meta.setLong(1, snap.epoch);
+                meta.setLong(2, snap.recipeScanned);
+                meta.setLong(3, snap.lootScanned);
+                meta.setLong(4, snap.builtMs);
+                meta.setLong(5, System.currentTimeMillis());
+                meta.executeUpdate();
+                closeQuiet(meta);
+
+                PreparedStatement edge = c.prepareStatement(
+                        "INSERT INTO refs_edges(epoch, src_reg, src_id, src_owner, dst_reg, dst_id, kind, tag) VALUES(?,?,?,?,?,?,?,?)");
+                long edgeRows = 0;
+                for (Map.Entry<String, java.util.List<RefEdge>> e : snap.index.entrySet()) {
+                    String dst = e.getKey();
+                    java.util.List<RefEdge> l = e.getValue();
+                    if (l == null) continue;
+                    for (RefEdge r : l) {
+                        edge.setLong(1, snap.epoch);
+                        edge.setString(2, r.kind == KIND_LOOT ? "loot_table" : "recipe");
+                        edge.setString(3, r.recipe);
+                        edge.setString(4, r.owner);
+                        edge.setString(5, "item");
+                        edge.setString(6, dst);
+                        edge.setInt(7, r.kind);
+                        edge.setString(8, r.tag);
+                        edge.addBatch();
+                        edgeRows++;
+                    }
+                }
+                edge.executeBatch();
+                closeQuiet(edge);
+
+                PreparedStatement tag = c.prepareStatement(
+                        "INSERT INTO refs_tag_members(epoch, tag_id, item_id) VALUES(?,?,?)");
+                long tagRows = 0;
+                for (Map.Entry<String, java.util.Set<String>> e : snap.tagMembers.entrySet()) {
+                    java.util.Set<String> members = e.getValue();
+                    if (members == null) continue;
+                    for (String item : members) {
+                        tag.setLong(1, snap.epoch);
+                        tag.setString(2, e.getKey());
+                        tag.setString(3, item);
+                        tag.addBatch();
+                        tagRows++;
+                    }
+                }
+                tag.executeBatch();
+                closeQuiet(tag);
+
+                PreparedStatement m = c.prepareStatement(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES(?,?)");
+                m.setString(1, "schema");
+                m.setString(2, String.valueOf(SCHEMA));
+                m.executeUpdate();
+                m.setString(1, "refs_epoch");
+                m.setString(2, Long.toHexString(snap.epoch));
+                m.executeUpdate();
+                closeQuiet(m);
+
+                c.commit();
+                out.rows = edgeRows + tagRows;
+                return out;
+            } catch (Throwable t) {
+                try { if (c != null) c.rollback(); } catch (Throwable ignored) {}
+                out.error = t.getClass().getSimpleName() + ": " + t.getMessage();
+                return out;
+            } finally {
+                closeQuiet(c);
+            }
+        }
+
+        private static void ensureSchema(Connection c) throws SQLException {
+            Statement s = c.createStatement();
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS refs_meta("
+                    + "epoch INTEGER PRIMARY KEY, recipe_scanned INTEGER NOT NULL, "
+                    + "loot_scanned INTEGER NOT NULL, built_ms INTEGER NOT NULL, saved_at INTEGER NOT NULL)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS refs_edges("
+                    + "epoch INTEGER NOT NULL, src_reg TEXT NOT NULL, src_id TEXT NOT NULL, "
+                    + "src_owner TEXT, dst_reg TEXT NOT NULL, dst_id TEXT NOT NULL, "
+                    + "kind INTEGER NOT NULL, tag TEXT)");
+            s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_refs_edges_epoch_dst ON refs_edges(epoch, dst_id)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS refs_tag_members("
+                    + "epoch INTEGER NOT NULL, tag_id TEXT NOT NULL, item_id TEXT NOT NULL, "
+                    + "PRIMARY KEY(epoch, tag_id, item_id))");
+            closeQuiet(s);
+        }
+
+        private static void deleteEpoch(Connection c, long epoch) throws SQLException {
+            PreparedStatement p = c.prepareStatement("DELETE FROM refs_edges WHERE epoch=?");
+            p.setLong(1, epoch); p.executeUpdate(); closeQuiet(p);
+            p = c.prepareStatement("DELETE FROM refs_tag_members WHERE epoch=?");
+            p.setLong(1, epoch); p.executeUpdate(); closeQuiet(p);
+            p = c.prepareStatement("DELETE FROM refs_meta WHERE epoch=?");
+            p.setLong(1, epoch); p.executeUpdate(); closeQuiet(p);
+        }
+
+        private static boolean ensureDriver() {
+            if (driverChecked) return driverAvailable;
+            synchronized (RefsSqliteStore.class) {
+                if (driverChecked) return driverAvailable;
+                try {
+                    DriverManager.getDriver("jdbc:sqlite:");
+                    driverAvailable = true;
+                    driverError = "";
+                } catch (Throwable t) {
+                    driverAvailable = false;
+                    driverError = "sqlite-jdbc no disponible: " + t.getClass().getSimpleName()
+                            + (t.getMessage() == null ? "" : ": " + t.getMessage());
+                }
+                driverChecked = true;
+                return driverAvailable;
+            }
+        }
+
+        private static String dbPath() {
+            try {
+                if (Agent.mksaDir == null) return "";
+                return Agent.mksaDir.resolve("index.db").toString();
+            } catch (Throwable t) {
+                return "";
+            }
+        }
+
+        private static void closeQuiet(AutoCloseable c) {
+            if (c == null) return;
+            try { c.close(); } catch (Throwable ignored) {}
+        }
     }
 
     private static void addRefEdge(Map<String, java.util.List<RefEdge>> idx, String itemId, RefEdge edge) {
@@ -2931,6 +3245,16 @@ public final class InProcess {
         index.put("reused", reused);
         index.put("keys", (long) idx.size());
         index.put("lootScanned", refsLootScanned);
+        index.put("source", refsIndexSource);
+        index.put("sqliteDriver", refsSqliteDriver);
+        index.put("sqliteHit", refsSqliteHit);
+        index.put("sqliteMiss", refsSqliteMiss);
+        index.put("sqliteLoadedRows", refsSqliteLoadedRows);
+        index.put("sqliteSavedRows", refsSqliteSavedRows);
+        index.put("sqlitePath", refsSqlitePath);
+        if (refsSqliteError != null && refsSqliteError.length() > 0) {
+            index.put("sqliteError", refsSqliteError);
+        }
 
         holder.put("ok", Boolean.TRUE);
         holder.put("ns", ns);
@@ -3771,6 +4095,11 @@ public final class InProcess {
             return finalizeAndStore(rcpt, TxJournal.Status.FAILED, restorePath);
         }
 
+        // ── paso 1b: tabVeto (corte tabs). Vacía la pestaña de inventario creativo
+        //    del namespace y fuerza el rebuild — vainilla oculta sola el botón de una
+        //    pestaña CATEGORY vacía. Best-effort: nunca bloquea la secuencia probada.
+        txStepTabVeto(rcpt, ns);
+
         // ── paso 2: snapshot ATÓMICO de presencia en una sola pasada sobre byChunk.
         //    {blocks, chunks, chunkKeys} se calculan juntos: si counts() y
         //    chunksWithNs() se llamasen en dos lecturas separadas, un autosave +
@@ -3864,6 +4193,11 @@ public final class InProcess {
         d1.put("priorCount", dis.get("count"));
         rcpt.addStep("vetoDisarm", TxJournal.Status.OK, ms, d1);
 
+        // ── paso 1b: tabRestore (corte tabs). Desarma el veto de pestaña y fuerza el
+        //    rebuild — el botón reaparece con sus items reales. Best-effort: nunca
+        //    bloquea la secuencia probada.
+        txStepTabRestore(rcpt, ns);
+
         // ── paso 2: restitución viva (corte 5b). Reconstruye cada BlockState desde
         //    el NBT capturado y lo re-inyecta en el mundo vivo (solo si la celda
         //    sigue en aire, §7). Si falla DURO tras haber mutado parte del mundo →
@@ -3916,6 +4250,66 @@ public final class InProcess {
             rcpt.recordError("vetoArm", t);
             return false;
         }
+    }
+
+    /**
+     * Corte tabs: arma el veto de pestaña de inventario creativo y fuerza el rebuild
+     * de las pestañas ya construidas. Best-effort — siempre devuelve {@code true} (no
+     * bloquea el resto de la secuencia Tier 1 ya probada, mismo espíritu que
+     * {@link #txStepItemSweep}/{@link #txStepContainerSweep} tratando NOT_READY como
+     * no-blocking). Cualquier excepción se registra {@code skipped} en el step.
+     */
+    private boolean txStepTabVeto(TxJournal.TxReceipt rcpt, String ns) {
+        long t0 = System.currentTimeMillis();
+        Map<String, Object> d = new java.util.LinkedHashMap<String, Object>();
+        try {
+            java.util.Set<String> s = new java.util.HashSet<String>();
+            s.add(ns);
+            Map<String, Object> r = Ledger.INSTANCE.armTabVeto(s);
+            Ledger.INSTANCE.rebuildAllCreativeTabs();
+            d.put("armed", Boolean.TRUE);
+            d.put("count", r.get("count"));
+            d.put("paramsCaptured", Ledger.INSTANCE.tabParamsCapturedCount());
+            d.put("rebuildCalls", Ledger.INSTANCE.tabRebuildCallsCount());
+            d.put("tabsSeen", Ledger.INSTANCE.tabRebuildTabsSeenCount());
+            d.put("invoked", Ledger.INSTANCE.tabRebuildInvokedCount());
+            d.put("invokeErrors", Ledger.INSTANCE.tabRebuildInvokeErrorsCount());
+            d.put("skipReason", Ledger.INSTANCE.tabRebuildLastSkipReason());
+            d.put("lastError", Ledger.INSTANCE.tabRebuildLastError());
+        } catch (Throwable t) {
+            d.put("skipped", Boolean.TRUE);
+            d.put("error", String.valueOf(t));
+        }
+        long ms = System.currentTimeMillis() - t0;
+        rcpt.addStep("tabVeto", TxJournal.Status.OK, ms, d);
+        return true;
+    }
+
+    /**
+     * Corte tabs: desarma el veto de pestaña y fuerza el rebuild (el botón reaparece
+     * con sus items reales). Best-effort, mismo contrato que {@link #txStepTabVeto}.
+     */
+    private boolean txStepTabRestore(TxJournal.TxReceipt rcpt, String ns) {
+        long t0 = System.currentTimeMillis();
+        Map<String, Object> d = new java.util.LinkedHashMap<String, Object>();
+        try {
+            Ledger.INSTANCE.disarmTabVeto();
+            Ledger.INSTANCE.rebuildAllCreativeTabs();
+            d.put("disarmed", Boolean.TRUE);
+            d.put("paramsCaptured", Ledger.INSTANCE.tabParamsCapturedCount());
+            d.put("rebuildCalls", Ledger.INSTANCE.tabRebuildCallsCount());
+            d.put("tabsSeen", Ledger.INSTANCE.tabRebuildTabsSeenCount());
+            d.put("invoked", Ledger.INSTANCE.tabRebuildInvokedCount());
+            d.put("invokeErrors", Ledger.INSTANCE.tabRebuildInvokeErrorsCount());
+            d.put("skipReason", Ledger.INSTANCE.tabRebuildLastSkipReason());
+            d.put("lastError", Ledger.INSTANCE.tabRebuildLastError());
+        } catch (Throwable t) {
+            d.put("skipped", Boolean.TRUE);
+            d.put("error", String.valueOf(t));
+        }
+        long ms = System.currentTimeMillis() - t0;
+        rcpt.addStep("tabRestore", TxJournal.Status.OK, ms, d);
+        return true;
     }
 
     private boolean txStepSweep(TxJournal.TxReceipt rcpt, String ns, String restorePath,
@@ -4287,6 +4681,14 @@ public final class InProcess {
     public long    refsWarmupAttempts() { return refsWarmupAttempts; }
     public long    refsWarmupMs()       { return refsWarmupMs; }
     public String  refsWarmupError()    { return refsWarmupError == null ? "" : refsWarmupError; }
+    public String  refsIndexSource()    { return refsIndexSource == null ? "" : refsIndexSource; }
+    public boolean refsSqliteDriver()   { return refsSqliteDriver; }
+    public boolean refsSqliteHit()      { return refsSqliteHit; }
+    public boolean refsSqliteMiss()     { return refsSqliteMiss; }
+    public long    refsSqliteLoadedRows() { return refsSqliteLoadedRows; }
+    public long    refsSqliteSavedRows()  { return refsSqliteSavedRows; }
+    public String  refsSqlitePath()     { return refsSqlitePath == null ? "" : refsSqlitePath; }
+    public String  refsSqliteError()    { return refsSqliteError == null ? "" : refsSqliteError; }
 
     // ════════════════════════════════════════════════════════════════════════
     // Tier 1 corte 6 — items vivos (jugador + cofres) + sonda creativa
@@ -4326,10 +4728,12 @@ public final class InProcess {
     private final java.util.List<Method> containerSizeCandidates = new java.util.ArrayList<Method>();
     private volatile boolean containerSizeDisambiguated;
     private volatile Method mContainerGetItem;
+    private volatile String containerGetItemSig = "unresolved";
     private volatile Method mContainerSetItem;
     private volatile Method mItemStackIsEmpty;
     private volatile Method mItemStackSave;          // ItemStack.save(HolderLookup.Provider): Tag
     private volatile Method mItemStackParseStatic;   // static ItemStack.parseOptional(HolderLookup.Provider, Tag): Optional
+    private volatile Method mItemDefaultInstance;     // Item.getDefaultInstance(): ItemStack
     private volatile Object emptyItemStack;
     private volatile Class<?> itemStackClass;
     private volatile Class<?> containerInterface;    // class_1263
@@ -5246,22 +5650,17 @@ public final class InProcess {
         for (Method m : itemStackClass.getMethods()) {
             if (Modifier.isStatic(m.getModifiers())) continue;
             if (m.getParameterTypes().length != 0) continue;
-            String rn = m.getReturnType().getName();
             if (mItemStackIsEmpty == null && m.getReturnType() == boolean.class
                     && (m.getName().equals("isEmpty") || m.getName().equals("method_7960"))) {
                 mItemStackIsEmpty = m; m.setAccessible(true);
-            }
-            if (mGetItem == null
-                    && (rn.equals("net.minecraft.class_1792") || rn.equals("net.minecraft.world.item.Item")
-                        || m.getName().equals("getItem") || m.getName().equals("method_7909"))) {
-                mGetItem = m; m.setAccessible(true);
             }
         }
         if (mItemStackIsEmpty == null) {
             try { mItemStackIsEmpty = itemStackClass.getMethod("method_7960"); mItemStackIsEmpty.setAccessible(true); } catch (Throwable t) {}
         }
-        if (mGetItem == null) {
-            try { mGetItem = itemStackClass.getMethod("method_7909"); mGetItem.setAccessible(true); } catch (Throwable t) {}
+        if (mGetItem == null || !isNamed(mGetItem.getReturnType(), ITEM_NAMES)) {
+            mGetItem = null;
+            resolveGetItem(itemStackClass);
         }
         // ItemStack.EMPTY static field
         for (Field f : itemStackClass.getDeclaredFields()) {
@@ -5280,6 +5679,8 @@ public final class InProcess {
         // Container interface
         containerInterface = findLoadedClass(CONTAINER_CLASSES);
         if (containerInterface == null) throw new RuntimeException("Container no cargado");
+        java.util.List<Method> getItemCandidates = new java.util.ArrayList<Method>();
+        java.util.List<Method> setItemCandidates = new java.util.ArrayList<Method>();
         for (Method m : containerInterface.getMethods()) {
             if (Modifier.isStatic(m.getModifiers())) continue;
             Class<?>[] ps = m.getParameterTypes();
@@ -5292,14 +5693,17 @@ public final class InProcess {
                 containerSizeCandidates.add(m);
                 if (mContainerGetSize == null) mContainerGetSize = m;
             } else if (ps.length == 1 && ps[0] == int.class && itemStackClass.isAssignableFrom(m.getReturnType())) {
-                if (mContainerGetItem == null) mContainerGetItem = m;
+                getItemCandidates.add(m);
             } else if (ps.length == 2 && ps[0] == int.class && itemStackClass.isAssignableFrom(ps[1]) && m.getReturnType() == void.class) {
-                if (mContainerSetItem == null) mContainerSetItem = m;
+                setItemCandidates.add(m);
             }
         }
+        mContainerGetItem = resolveContainerGetItem(getItemCandidates);
+        mContainerSetItem = resolveContainerSetItem(setItemCandidates);
         if (mContainerGetSize == null || mContainerGetItem == null || mContainerSetItem == null) {
             throw new RuntimeException("Container methods no resueltos: size=" + (mContainerGetSize != null)
-                    + " get=" + (mContainerGetItem != null) + " set=" + (mContainerSetItem != null));
+                    + " get=" + (mContainerGetItem != null) + " set=" + (mContainerSetItem != null)
+                    + " getSig=" + containerGetItemSig);
         }
 
         // server.registryAccess() / provider
@@ -5414,6 +5818,65 @@ public final class InProcess {
                 }
             }
         }
+    }
+
+    private Method resolveContainerGetItem(java.util.List<Method> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            containerGetItemSig = "unresolved:no-candidates";
+            return null;
+        }
+        Method fallback = null;
+        int fallbackCount = 0;
+        java.util.List<String> names = new java.util.ArrayList<String>();
+        for (Method m : candidates) {
+            String n = m.getName();
+            names.add(n);
+            if (isSafeContainerGetItemName(n)) {
+                m.setAccessible(true);
+                containerGetItemSig = "safe-name:" + m.getDeclaringClass().getSimpleName() + "." + n;
+                return m;
+            }
+            if (!isDestructiveContainerGetterName(n)) {
+                fallback = m;
+                fallbackCount++;
+            }
+        }
+        if (fallbackCount == 1) {
+            fallback.setAccessible(true);
+            containerGetItemSig = "single-nonsuspect:" + fallback.getDeclaringClass().getSimpleName()
+                    + "." + fallback.getName();
+            return fallback;
+        }
+        containerGetItemSig = "ambiguous:" + names;
+        return null;
+    }
+
+    private Method resolveContainerSetItem(java.util.List<Method> candidates) {
+        if (candidates == null || candidates.isEmpty()) return null;
+        for (Method m : candidates) {
+            String n = m.getName();
+            if (n.equals("setItem") || n.equals("setStack") || n.equals("setStackInSlot")
+                    || n.equals("method_5447")) {
+                m.setAccessible(true);
+                return m;
+            }
+        }
+        Method m = candidates.get(0);
+        m.setAccessible(true);
+        return m;
+    }
+
+    private static boolean isSafeContainerGetItemName(String n) {
+        return n != null && (n.equals("getItem") || n.equals("getStack")
+                || n.equals("getStackInSlot") || n.equals("method_5438"));
+    }
+
+    private static boolean isDestructiveContainerGetterName(String n) {
+        if (n == null) return true;
+        String s = n.toLowerCase(java.util.Locale.ROOT);
+        return s.contains("remove") || s.contains("take") || s.contains("extract")
+                || s.contains("clear") || s.contains("split") || s.contains("pop")
+                || s.equals("method_5441") || s.equals("method_5434");
     }
 
     /**
@@ -5845,6 +6308,285 @@ public final class InProcess {
             }
             return null;
         } catch (Throwable t) { return null; }
+    }
+
+    private String itemId(Object stack) {
+        try {
+            Object item = mGetItem.invoke(stack);
+            if (item == null || itemGetId == null || itemRegistry == null) return null;
+            Object id = itemGetId.invoke(itemRegistry, item);
+            return id == null ? null : id.toString();
+        } catch (Throwable t) { return null; }
+    }
+
+    private Object resolveItemById(String id) {
+        try {
+            ensureItemRegistry();
+            if (itemRegistry == null || itemGetId == null || id == null || id.isEmpty()) return null;
+            for (Object item : (Iterable<?>) itemRegistry) {
+                Object itemId = itemGetId.invoke(itemRegistry, item);
+                if (itemId != null && id.equals(itemId.toString())) return item;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private Object defaultStackForItem(Object item) {
+        if (item == null || itemStackClass == null) return null;
+        try {
+            if (mItemDefaultInstance == null || !itemStackClass.isAssignableFrom(mItemDefaultInstance.getReturnType())) {
+                mItemDefaultInstance = null;
+                for (Method m : item.getClass().getMethods()) {
+                    if (Modifier.isStatic(m.getModifiers())) continue;
+                    if (m.getParameterTypes().length != 0) continue;
+                    if (!itemStackClass.isAssignableFrom(m.getReturnType())) continue;
+                    String n = m.getName();
+                    if (n.equals("getDefaultInstance") || n.equals("defaultInstance")
+                            || n.equals("method_7854") || n.equals("method_7935")) {
+                        m.setAccessible(true);
+                        mItemDefaultInstance = m;
+                        break;
+                    }
+                    if (mItemDefaultInstance == null) {
+                        m.setAccessible(true);
+                        mItemDefaultInstance = m;
+                    }
+                }
+            }
+            if (mItemDefaultInstance != null) {
+                Object stack = mItemDefaultInstance.invoke(item);
+                if (stack != null) return stack;
+            }
+        } catch (Throwable ignored) {}
+        try {
+            for (Constructor<?> c : itemStackClass.getDeclaredConstructors()) {
+                Class<?>[] ps = c.getParameterTypes();
+                if (ps.length != 1) continue;
+                if (!ps[0].isAssignableFrom(item.getClass()) && !item.getClass().isAssignableFrom(ps[0])) continue;
+                c.setAccessible(true);
+                Object stack = c.newInstance(item);
+                if (stack != null) return stack;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private Object makeItemStack(String itemId) {
+        try {
+            ensureItemMethods(server != null ? server : Boot.clientInstance);
+            Object item = resolveItemById(itemId);
+            return defaultStackForItem(item);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    public Map<String, Object> inventoryFixture(final String vanillaItemId, final String victimItemId) {
+        if (vanillaItemId == null || vanillaItemId.isEmpty()) {
+            return fail("BAD_PARAMS", "inventoryFixture requiere vanillaItemId");
+        }
+        if (victimItemId == null || victimItemId.isEmpty()) {
+            return fail("BAD_PARAMS", "inventoryFixture requiere victimItemId");
+        }
+        return runOnServer((srv, holder) -> attemptInventoryFixture(srv, vanillaItemId, victimItemId, holder));
+    }
+
+    public Map<String, Object> inventorySnapshot() {
+        return runOnServer((srv, holder) -> attemptInventorySnapshot(srv, holder));
+    }
+
+    public String modThinInventoryRegression(String victimNs, String vanillaItemId, String victimItemId) {
+        Map<String, Object> r = runOnServer((srv, holder) ->
+                attemptInventoryRegression(srv, victimNs, vanillaItemId, victimItemId, holder));
+        return Agent.Json.write(r);
+    }
+
+    private void attemptInventoryFixture(Object candidate, String vanillaItemId, String victimItemId,
+                                         Map<String, Object> holder) throws Exception {
+        List<Object> lvls = ensureLevels(candidate);
+        if (lvls == null || lvls.isEmpty()) return;
+        server = candidate;
+        ensureLevelMethods(lvls.get(0));
+        ensureItemMethods(candidate);
+        List<Object> players = livePlayers(candidate);
+        if (players.isEmpty()) {
+            holder.put("code", "NOT_READY");
+            holder.put("error", "no hay jugador vivo para sembrar inventario");
+            return;
+        }
+        Object p = players.get(0);
+        Object inv = readField(fPlayerInventory, p);
+        if (inv == null) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no se pudo leer el inventario del jugador");
+            return;
+        }
+        Object vanilla = makeItemStack(vanillaItemId);
+        Object victim = makeItemStack(victimItemId);
+        if (vanilla == null || victim == null) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no se pudieron construir stacks: vanilla=" + (vanilla != null)
+                    + " victim=" + (victim != null));
+            return;
+        }
+        int size = ((Integer) mContainerGetSize.invoke(inv)).intValue();
+        int vanillaSlot = -1;
+        int victimSlot = -1;
+        for (int i = 0; i < size; i++) {
+            Object cur = mContainerGetItem.invoke(inv, Integer.valueOf(i));
+            if (cur == null || isEmptyStack(cur)) {
+                if (vanillaSlot < 0) vanillaSlot = i;
+                else if (victimSlot < 0) { victimSlot = i; break; }
+            }
+        }
+        if (vanillaSlot < 0 || victimSlot < 0) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no hay dos slots vacios para la fixture");
+            return;
+        }
+        mContainerSetItem.invoke(inv, Integer.valueOf(vanillaSlot), vanilla);
+        mContainerSetItem.invoke(inv, Integer.valueOf(victimSlot), victim);
+
+        java.util.List<Map<String, Object>> snapshot = snapshotInventory(inv);
+        holder.put("ok", Boolean.TRUE);
+        holder.put("vanillaItemId", vanillaItemId);
+        holder.put("victimItemId", victimItemId);
+        holder.put("vanillaSlot", vanillaSlot);
+        holder.put("victimSlot", victimSlot);
+        holder.put("snapshot", snapshot);
+    }
+
+    private void attemptInventorySnapshot(Object candidate, Map<String, Object> holder) throws Exception {
+        List<Object> lvls = ensureLevels(candidate);
+        if (lvls == null || lvls.isEmpty()) return;
+        server = candidate;
+        ensureLevelMethods(lvls.get(0));
+        ensureItemMethods(candidate);
+        List<Object> players = livePlayers(candidate);
+        if (players.isEmpty()) {
+            holder.put("code", "NOT_READY");
+            holder.put("error", "no hay jugador vivo para leer inventario");
+            return;
+        }
+        Object inv = readField(fPlayerInventory, players.get(0));
+        if (inv == null) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no se pudo leer el inventario del jugador");
+            return;
+        }
+        holder.put("ok", Boolean.TRUE);
+        holder.put("snapshot", snapshotInventory(inv));
+    }
+
+    private void attemptInventoryRegression(Object candidate, String victimNs, String vanillaItemId,
+                                            String victimItemId, Map<String, Object> holder) throws Exception {
+        List<Object> lvls = ensureLevels(candidate);
+        if (lvls == null || lvls.isEmpty()) return;
+        server = candidate;
+        ensureLevelMethods(lvls.get(0));
+        ensureItemMethods(candidate);
+        List<Object> players = livePlayers(candidate);
+        if (players.isEmpty()) {
+            holder.put("code", "NOT_READY");
+            holder.put("error", "no hay jugador vivo para la regresion");
+            return;
+        }
+        Object inv = readField(fPlayerInventory, players.get(0));
+        if (inv == null) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no se pudo leer el inventario del jugador");
+            return;
+        }
+
+        Object vanilla = makeItemStack(vanillaItemId);
+        Object victim = makeItemStack(victimItemId);
+        if (vanilla == null || victim == null) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no se pudieron construir stacks");
+            return;
+        }
+
+        int size = ((Integer) mContainerGetSize.invoke(inv)).intValue();
+        int vanillaSlot = -1;
+        int victimSlot = -1;
+        for (int i = 0; i < size; i++) {
+            Object cur = mContainerGetItem.invoke(inv, Integer.valueOf(i));
+            if (cur == null || isEmptyStack(cur)) {
+                if (vanillaSlot < 0) vanillaSlot = i;
+                else if (victimSlot < 0) { victimSlot = i; break; }
+            }
+        }
+        if (vanillaSlot < 0 || victimSlot < 0) {
+            holder.put("code", "INTERNAL");
+            holder.put("error", "no hay dos slots vacios para la fixture");
+            return;
+        }
+
+        mContainerSetItem.invoke(inv, Integer.valueOf(vanillaSlot), vanilla);
+        mContainerSetItem.invoke(inv, Integer.valueOf(victimSlot), victim);
+
+        Map<String, Object> sweep = new java.util.HashMap<String, Object>();
+        attemptItemSweep(candidate, victimNs, "mksa-test-inventory-regression", sweep);
+        if (!Boolean.TRUE.equals(sweep.get("ok"))) {
+            holder.put("code", String.valueOf(sweep.get("code")));
+            holder.put("error", String.valueOf(sweep.get("error")));
+            return;
+        }
+
+        java.util.List<Map<String, Object>> snapshot = snapshotInventory(inv);
+        Map<String, Object> vanillaRow = null;
+        Map<String, Object> victimRow = null;
+        for (Map<String, Object> row : snapshot) {
+            Object slotObj = row.get("slot");
+            if (!(slotObj instanceof Integer)) continue;
+            int slot = ((Integer) slotObj).intValue();
+            if (slot == vanillaSlot) vanillaRow = row;
+            if (slot == victimSlot) victimRow = row;
+        }
+
+        boolean vanillaStillThere = vanillaRow != null && !Boolean.TRUE.equals(vanillaRow.get("empty"))
+                && "minecraft:air".equals(String.valueOf(vanillaRow.get("itemId"))) == false;
+        boolean victimGone = victimRow != null && Boolean.TRUE.equals(victimRow.get("empty"));
+
+        holder.put("ok", Boolean.valueOf(vanillaStillThere && victimGone));
+        holder.put("victimNs", victimNs);
+        holder.put("vanillaItemId", vanillaItemId);
+        holder.put("victimItemId", victimItemId);
+        holder.put("vanillaSlot", vanillaSlot);
+        holder.put("victimSlot", victimSlot);
+        holder.put("vanillaAfter", vanillaRow);
+        holder.put("victimAfter", victimRow);
+        holder.put("sweep", sweep);
+        holder.put("vanillaPreserved", Boolean.valueOf(vanillaStillThere));
+        holder.put("victimRemoved", Boolean.valueOf(victimGone));
+        if (!vanillaStillThere) {
+            holder.put("code", "REGRESSION");
+            holder.put("error", "la pila vanilla fue borrada");
+        } else if (!victimGone) {
+            holder.put("code", "REGRESSION");
+            holder.put("error", "la pila victima no fue borrada");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private java.util.List<Map<String, Object>> snapshotInventory(Object container) {
+        java.util.List<Map<String, Object>> slots = new java.util.ArrayList<Map<String, Object>>();
+        try {
+            int size = ((Integer) mContainerGetSize.invoke(container)).intValue();
+            for (int i = 0; i < size; i++) {
+                Object stack = mContainerGetItem.invoke(container, Integer.valueOf(i));
+                Map<String, Object> row = new java.util.LinkedHashMap<String, Object>();
+                row.put("slot", Integer.valueOf(i));
+                row.put("empty", Boolean.valueOf(stack == null || isEmptyStack(stack)));
+                row.put("itemId", stack == null || isEmptyStack(stack) ? "minecraft:air" : itemId(stack));
+                slots.add(row);
+            }
+        } catch (Throwable t) {
+            Map<String, Object> row = new java.util.LinkedHashMap<String, Object>();
+            row.put("error", String.valueOf(t));
+            slots.add(row);
+        }
+        return slots;
     }
 
     private static Object invoke(Method m, Object target) {

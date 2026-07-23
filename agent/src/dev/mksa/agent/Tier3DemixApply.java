@@ -112,31 +112,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class Tier3DemixApply {
 
-    /** T3 corte AM: los 15 targets de chat_heads, para que
-     * t3.demixGroupDisable/t3.demixGroupEnable resuelvan el grupo
-     * server-side a partir de {"namespace": "chat_heads"} -- el caller no
-     * envia la lista de targets. */
-    static final String[] CHAT_HEADS_TARGETS = new String[] {
-            "net.minecraft.class_7471",
-            "net.minecraft.class_7594",
-            "net.minecraft.class_2535",
-            "net.minecraft.class_1066",
-            "net.minecraft.class_11878",
-            "net.minecraft.class_4717$class_464",
-            "net.minecraft.class_11879",
-            "net.minecraft.class_11879$class_11880",
-            "net.minecraft.class_3872",
-            "net.minecraft.class_11228",
-            "net.minecraft.class_338",
-            "net.minecraft.class_634",
-            "net.minecraft.class_10538",
-    };
-
-    /** Resuelve los targets de un namespace conocido para el grupo atomico.
-     * null si el namespace no tiene un grupo registrado. */
+    /** Resuelve los targets de un namespace conocido de forma 100% dinamica.
+     * null si el namespace no tiene targets mixin registrados. */
     static String[] targetsForNamespace(String namespace) {
-        if ("chat_heads".equals(namespace)) return CHAT_HEADS_TARGETS.clone();
-        return null;
+        if (namespace == null || namespace.isEmpty()) return null;
+        Set<String> set = Tier3MixinAudit.scanTargets(namespace);
+        if (set == null || set.isEmpty()) return null;
+        return set.toArray(new String[0]);
     }
 
     /** Registro de un target actualmente desactivado por este mecanismo:
@@ -714,10 +696,37 @@ final class Tier3DemixApply {
 
     private static ByteResult computeDisableBytes(String target, Class<?> cls,
             Tier3MixinAudit.DemixMode mode, String namespace) {
+        if (mode == Tier3MixinAudit.DemixMode.PRESERVE_SHAPE) {
+            return computePreserveShapeBytes(target, namespace);
+        }
         if (mode == Tier3MixinAudit.DemixMode.REPLAY) {
             return computeReplayBytes(target, cls, namespace);
         }
         return computeResetBytes(target);
+    }
+
+    private static ByteResult computePreserveShapeBytes(String target, String victimNs) {
+        byte[] liveBytes = Tier3LiveCapture.get(target);
+        byte[] baseBytes = Tier3MixinAudit.baseBytes(target);
+        if (liveBytes == null) {
+            return ByteResult.fail("LIVE_BYTES_MISSING", "Tier3LiveCapture no tiene bytes vivos capturados de " + target);
+        }
+        if (baseBytes == null) {
+            return ByteResult.fail("BASE_BYTES_MISSING", "No hay bytes base (pre-mixin) capturados de " + target);
+        }
+        Set<String> excludeSet = Tier3MixinAudit.mixinClassNamesForTarget(victimNs, target, Boot.modRoots);
+        Tier3ShapePreservingDemix.Outcome outcome = Tier3ShapePreservingDemix.synthesize(target, liveBytes, baseBytes, excludeSet);
+        if (!outcome.ok) {
+            return ByteResult.fail("SHAPE_PRESERVE_SYNTHESIS_FAILED", outcome.error);
+        }
+        Map<String, Object> detail = new LinkedHashMap<String, Object>();
+        detail.put("model", "preserve_shape_v1");
+        detail.put("victimNs", victimNs);
+        detail.put("liveSha256", sha256(liveBytes));
+        detail.put("baseSha256", sha256(baseBytes));
+        detail.put("offSha256", sha256(outcome.bytes));
+        detail.put("neutralizedMethods", outcome.neutralizedMethods);
+        return ByteResult.ok(outcome.bytes, detail);
     }
 
     private static ByteResult computeResetBytes(String target) {

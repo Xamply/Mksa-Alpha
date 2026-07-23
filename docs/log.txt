@@ -1,6 +1,10 @@
 MKSA - LOG
 Una linea por hito. Formato: YYYY-MM-DD HH:MM | etapa | que se hizo
 
+2026-07-23 08:54 | T3 Plan Maestro P2 | Interfaz, métricas y cierre definitivo: supportedDisable eliminado de la UI a favor de toggleCapability/toggleState dinámicos; visibleRows recomputado dinámicamente; ToggleService unificado (preview con caducidad/PLAN_STALE, apply, status, cancel); MetricsSampler (muestreo delta de FPS, RAM, GC pauses, MSPT); arquitectura de adaptadores HotToggleAdapter y Tier3AdapterRegistry. Verificación en vivo OK.
+
+2026-07-23 08:39 | T3 Plan Maestro P1 | Motor Tier 3 rediseñado: Tier3RuntimeState (máquina 9 estados), Tier3ShapePreservingDemix (modo PRESERVE_SHAPE), eliminación de whitelists hardcodeadas (targetsForNamespace 100% dinámico), micro-smoke JBR21 en Boot.java. Verificación OK con 18/18 targets activos.
+
 2026-07-23 06:53 | T3 chat_heads | Audited & Hash-pinned external shape consumer classes: 18/18 targets de chat_heads con externalShapeConsumers.allKnown=true y fieldSafety.allKnown=true (0 targets bloqueados, 13 RESET / 5 REPLAY). demixPlan.externalShapeConsumerTrust pasa a "no_external_shape_consumer_found", blocker superado completamente.
 
 2026-07-23 05:50 | T3 chat_heads | Diagnostico exacto de t3.mixinPlan(ns=chat_heads) ejecutado en vivo: 18 targets totales, fieldSafety.allKnown=true en todos (0 campos @Unique unknown); 11 targets allKnown=true completos (RESET/REPLAY); 7 targets con externalShapeConsumers.allKnown=false por clases consumidoras externas con reflection_risk.

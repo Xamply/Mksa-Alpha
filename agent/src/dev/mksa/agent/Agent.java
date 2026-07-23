@@ -566,6 +566,30 @@ public final class Agent {
             Map<String, Object> r = Ledger.INSTANCE.runtimeRestore(ns);
             if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
             else c.send(err(id, "INTERNAL", "runtime.restore fallo", r));
+        } else if ("tx.preview".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;
+            String dir = p != null && p.get("dir") instanceof String ? (String) p.get("dir") : "disable";
+            if (ns == null || ns.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.preview requiere ns", null));
+                return;
+            }
+            c.send(res(id, ToggleService.INSTANCE.preview(ns, dir)));
+        } else if ("tx.apply".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String planId = p != null && p.get("planId") instanceof String ? (String) p.get("planId") : null;
+            if (planId == null || planId.isEmpty()) {
+                c.send(err(id, "BAD_PARAMS", "tx.apply requiere planId", null));
+                return;
+            }
+            Map<String, Object> r = ToggleService.INSTANCE.apply(planId);
+            if (Boolean.TRUE.equals(r.get("ok"))) c.send(res(id, r));
+            else c.send(err(id, r.get("code") instanceof String ? (String) r.get("code") : "INTERNAL",
+                    String.valueOf(r.get("error")), r));
+        } else if ("tx.status".equals(method)) {
+            Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
+            String opId = p != null && p.get("opId") instanceof String ? (String) p.get("opId") : "";
+            c.send(res(id, ToggleService.INSTANCE.status(opId)));
         } else if ("tx.disablePlan".equals(method)) {
             Map<?, ?> p = m.get("p") instanceof Map ? (Map<?, ?>) m.get("p") : null;
             String ns = p != null && p.get("ns") instanceof String ? (String) p.get("ns") : null;

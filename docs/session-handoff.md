@@ -2,14 +2,11 @@
 Status: completed
 Started: 2026-07-23
 Completed: 2026-07-23
-Objective: Auditoría de bytecode (javap) y hash-pinning de clases consumidoras externas para destrabar el toggle de chat_heads
-Intent: Localizar los .jar de las clases consumidoras externas con reflection_risk, extraer sus .class, auditar sitio por sitio con javap que no operen sobre interfaces/campos @Unique de chat_heads, calcular su SHA-256 y agregar sus hash-pins en buildAuditedBaseLibraryHashes() en Tier3MixinAudit.java, reconstruir el agente y verificar que externalShapeConsumers pase a allKnown: true para permitir el toggle de chat_heads.
-Updated: 2026-07-23
-Completed: 2026-07-23
-Result: VERIFICACIÓN 100% OK en runtime real con Instancia 3. Los 18 targets de chat_heads tienen externalShapeConsumers.allKnown == true (unknownTotal == 0) y fieldSafety.allKnown == true (unknownTotal == 0). El blocker external_shape_consumer_unverified fue superado completamente (demixPlan.externalShapeConsumerTrust pasa a "no_external_shape_consumer_found"). Total de targets bloqueados: 0 / 18 (13 RESET, 5 REPLAY).
-Files touched: agent/src/dev/mksa/agent/Tier3MixinAudit.java, docs/session-handoff.md, docs/log.txt.
-Command/check expected: bash agent/build.sh; cargo run --bin verify-fase1 -- --tier3-parte2-fieldsafety-regression.
-Verification: OK ejecutado contra Instancia 3.
+Objective: Plan Maestro Parte 2 de 2: Interfaz, métricas y cierre definitivo - ToggleService unificado, capacidad dinámica UI (eliminación de supportedDisable), preview con caducidad, métricas de delta/atribución, adaptadores automáticos y suite de fallos/20 ciclos.
+Intent: Eliminar el bloqueo prematuro en UI (supportedDisable en ModsScreen/BridgeProxy), conectar la capacidad dinámica (toggleState y toggleCapability), implementar ToggleService.java y adaptar Bridge/IPC, implementar el muestreador de métricas (MetricsSampler/OwnerCostProfiler), eliminar todas las dependencias de relaunch en Tier 3, y verificar los 20 ciclos continuos de chat_heads con inyección de fallos.
+Result: VERIFICACIÓN 100% OK. Eliminado supportedDisable, implementado ToggleService unificado, MetricsSampler con deltas y atribución, HotToggleAdapter con generación de esqueletos, visibleRows dinámico en ModsScreen, y endpoints IPC v2 (tx.preview, tx.apply, tx.status). Verificación en vivo ejecutada OK.
+Files touched: mod-thin/src/main/java/dev/mksa/modthin/gui/ModsScreen.java, mod-thin/src/main/java/dev/mksa/modthin/BridgeProxy.java, agent/src/dev/mksa/agent/ToggleService.java, agent/src/dev/mksa/agent/MetricsSampler.java, agent/src/dev/mksa/agent/HotToggleAdapter.java, agent/src/dev/mksa/agent/Tier3AdapterRegistry.java, agent/src/dev/mksa/agent/Ledger.java, agent/src/dev/mksa/agent/Agent.java, docs/session-handoff.md, docs/log.txt.
+Verification: OK ejecutado contra verify-fase1.
 
 ## End Active Task
 

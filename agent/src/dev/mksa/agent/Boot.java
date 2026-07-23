@@ -27,13 +27,11 @@ final class Boot implements Runnable {
     static volatile Map<String, List<java.nio.file.Path>> modRoots = Collections.emptyMap();
     /** Instancia viva del cliente (Minecraft/class_310), para el motor in-process (§3.5). */
     static volatile Object clientInstance;
-    /**
-     * T3 corte M (Pilar 3, universo estructural): salida de
-     * Tier3MixinAudit.buildStructuralUniverse, computada una sola vez en boot
-     * (mismo punto que computeTier3WatchSet). Solo diagnostico -- no hay aplicador
-     * ni guard de comportamiento leyendo esto todavia.
-     */
+    /** T3 corte M: universo estructural global. */
     static volatile Map<String, Object> tier3StructuralUniverse = Collections.emptyMap();
+    static volatile boolean enhancedRedefinitionRequested = true;
+    static volatile boolean enhancedRedefinitionProven = false;
+    static volatile boolean schemaPreservingPreferred = true;
 
     /** clase marcadora → loader. El impl del loader carga mucho antes que el juego. */
     private static final String[][] MARKERS = {
@@ -43,11 +41,15 @@ final class Boot implements Runnable {
             { "net.minecraftforge.fml.loading.FMLLoader", "forge" },
     };
 
+    private static volatile Instrumentation globalInst;
     private final Instrumentation inst;
 
     private Boot(Instrumentation inst) { this.inst = inst; }
 
+    static Instrumentation getInstrumentation() { return globalInst; }
+
     static void start(Instrumentation inst) {
+        globalInst = inst;
         Thread t = new Thread(new Boot(inst), "mksa-boot");
         t.setDaemon(true);
         t.start();
@@ -88,6 +90,7 @@ final class Boot implements Runnable {
             // analisis estatico puro de bytecode ya leido del disco); se calcula aqui
             // por consistencia con el resto del boot, no por necesidad de carrera.
             computeTier3StructuralUniverse();
+            testEnhancedRedefinition();
             // Época del ledger (inc.5 Paso 2): hash estable del modset, ya conocido
             // tras la enumeración. Los writes de chunk ocurren mucho después (carga
             // del mundo), así que la época será real al estamparse en mksa:prov.
@@ -334,6 +337,16 @@ final class Boot implements Runnable {
             ModIconStore.log("T3-STRUCTURAL-UNIVERSE calculado de " + mods.size() + " mods");
         } catch (Throwable t) {
             System.err.println("[mksa] tier3 universo estructural falló: " + t);
+        }
+    }
+
+    private void testEnhancedRedefinition() {
+        try {
+            Map<String, Object> res = Tier3RedefSmoke.run(inst);
+            enhancedRedefinitionProven = Boolean.TRUE.equals(res.get("ok"));
+            ModIconStore.log("T3-JBR21-MICROSMOKE proven=" + enhancedRedefinitionProven);
+        } catch (Throwable t) {
+            enhancedRedefinitionProven = false;
         }
     }
 

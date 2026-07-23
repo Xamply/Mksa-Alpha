@@ -49,9 +49,12 @@ final class BridgeProxy {
                 e.enabled = Boolean.TRUE.equals(mm.get("enabled"));
                 // running = estado real para la UI. Si el agente no envia el campo
                 // (version vieja del Bridge), caemos a enabled como en v0.
-                Object running = mm.get("running");
-                e.running = running == null ? e.enabled : Boolean.TRUE.equals(running);
                 e.supportedDisable = Boolean.TRUE.equals(mm.get("supportedDisable"));
+                e.toggleState = asString(mm.get("toggleState"));
+                if (e.toggleState == null) e.toggleState = e.running ? "active" : "inactive_verified";
+                e.toggleCapability = asString(mm.get("toggleCapability"));
+                if (e.toggleCapability == null) e.toggleCapability = "ready";
+                e.mechanism = asString(mm.get("mechanism"));
                 e.semantic = parseSemantic(mm.get("semantic"));
                 Object files = mm.get("files");
                 e.files = files instanceof List ? toStringList((List<Object>) files) : Collections.<String>emptyList();
@@ -471,7 +474,10 @@ final class BridgeProxy {
         Integer tier;             // null si no clasificado
         boolean enabled;          // loader-side (siempre true; compat)
         boolean running;          // true = activo; false = desactivado in-process
-        boolean supportedDisable; // tier == 1 en este corte
+        boolean supportedDisable; // compat
+        String toggleState;       // active, inactive_verified, etc.
+        String toggleCapability;  // ready, analyzing, needs_adapter, runtime_unsupported
+        String mechanism;         // tier3_shape_preserving_demix, etc.
         List<String> files;       // rutas absolutas de .jar; vacio si el agente no lo expone
         String description;       // null si el mod no la declara
         SemanticProfile semantic; // perfil semantico derivado del WCG

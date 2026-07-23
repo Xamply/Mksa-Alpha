@@ -93,7 +93,8 @@ public final class ModsScreen extends class_437 {
      * podia alcanzarlas.
      */
     private void recomputeVisibleRows() {
-        this.visibleRows = 4;
+        int available = Math.max(ROW_HEIGHT, this.field_22790 - LIST_TOP - BOTTOM_RESERVED);
+        this.visibleRows = Math.max(1, available / ROW_HEIGHT);
     }
 
     private void rebuild() {
@@ -166,8 +167,9 @@ public final class ModsScreen extends class_437 {
         this.method_37063(this.tierToggleBtn);
 
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        boolean disableActive = !busy && sel != null && sel.running && sel.supportedDisable;
-        boolean enableActive  = !busy && sel != null && !sel.running && sel.supportedDisable;
+        boolean isRuntimeUnsupported = sel != null && "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability);
+        boolean disableActive = !busy && sel != null && "active".equalsIgnoreCase(sel.toggleState) && !isRuntimeUnsupported;
+        boolean enableActive  = !busy && sel != null && "inactive_verified".equalsIgnoreCase(sel.toggleState) && !isRuntimeUnsupported;
 
         int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
         int actY = panelBottom + 6;
@@ -389,12 +391,7 @@ public final class ModsScreen extends class_437 {
                     LIST_PAD, this.field_22790 - 38, col);
         }
 
-        if (sel != null && !sel.supportedDisable) {
-            ctx.method_25303(this.field_22793, "Tier no soportado",
-                    sideX, LIST_TOP + 100, 0xFFAAAAAA);
-            ctx.method_25303(this.field_22793, "en esta version.",
-                    sideX, LIST_TOP + 112, 0xFFAAAAAA);
-        }
+
     }
 
     private void drawChip(class_332 ctx, int x, int y, String label, int color) {
@@ -559,7 +556,8 @@ public final class ModsScreen extends class_437 {
 
     private void onDisable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        if (sel == null || !sel.supportedDisable || !sel.running || busy) return;
+        if (sel == null || busy || "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability)) return;
+        if (!"active".equalsIgnoreCase(sel.toggleState)) return;
         final String ns = sel.id;
         final String name = sel.name;
         busy = true; rebuild();
@@ -582,7 +580,8 @@ public final class ModsScreen extends class_437 {
 
     private void onEnable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        if (sel == null || !sel.supportedDisable || sel.running || busy) return;
+        if (sel == null || busy || "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability)) return;
+        if (!"inactive_verified".equalsIgnoreCase(sel.toggleState)) return;
         runAction(sel.id, false);
     }
 

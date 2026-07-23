@@ -1098,7 +1098,7 @@ final class Tier3MixinAudit {
      * campo {@code replay} de la vieja TargetEntry (Tier3DemixApply, whitelist
      * tipeada a mano). BLOCKED es nuevo: no existia en el diseño anterior
      * (donde "no elegible" era simplemente "ausente del mapa", sin razon). */
-    public enum DemixMode { RESET, REPLAY, BLOCKED }
+    public enum DemixMode { RESET, REPLAY, PRESERVE_SHAPE, BLOCKED }
 
     /** Resultado de clasificar un target: modo + (si BLOCKED) las razones
      * concretas, nunca solo un booleano -- mismo principio de honestidad que

@@ -32,15 +32,18 @@ public final class Tier3AdapterRegistry {
         skeleton.put("surface", surface);
         skeleton.put("adapterClassName", "dev.mksa.agent.adapters." + capitalize(namespace) + "HotAdapter");
         skeleton.put("status", "skeleton_generated");
+        skeleton.put("ok", Boolean.FALSE);
+        skeleton.put("code", "ADAPTER_NOT_IMPLEMENTED");
+        skeleton.put("retryable", Boolean.TRUE);
         skeleton.put("codeStub",
                 "public class " + capitalize(namespace) + "HotAdapter implements HotToggleAdapter {\n"
-              + "    public Map<String, Object> probe(Map<String, Object> ctx) { return Collections.singletonMap(\"ok\", true); }\n"
-              + "    public Map<String, Object> snapshot(Map<String, Object> ctx) { return Collections.emptyMap(); }\n"
-              + "    public Map<String, Object> disable(Map<String, Object> ctx, Map<String, Object> snap) { return Collections.singletonMap(\"ok\", true); }\n"
-              + "    public Map<String, Object> enable(Map<String, Object> ctx, Map<String, Object> snap) { return Collections.singletonMap(\"ok\", true); }\n"
-              + "    public Map<String, Object> verifyDisabled(Map<String, Object> ctx) { return Collections.singletonMap(\"ok\", true); }\n"
-              + "    public Map<String, Object> verifyEnabled(Map<String, Object> ctx) { return Collections.singletonMap(\"ok\", true); }\n"
-              + "    public Map<String, Object> rollback(Map<String, Object> ctx, Map<String, Object> snap) { return Collections.singletonMap(\"ok\", true); }\n"
+              + "    public Map<String, Object> probe(Map<String, Object> ctx) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); m.put(\"surface\", \"" + surface + "\"); m.put(\"retryable\", true); return m; }\n"
+              + "    public Map<String, Object> snapshot(Map<String, Object> ctx) { throw new UnsupportedOperationException(\"ADAPTER_NOT_IMPLEMENTED\"); }\n"
+              + "    public Map<String, Object> disable(Map<String, Object> ctx, Map<String, Object> snap) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); m.put(\"retryable\", true); return m; }\n"
+              + "    public Map<String, Object> enable(Map<String, Object> ctx, Map<String, Object> snap) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); m.put(\"retryable\", true); return m; }\n"
+              + "    public Map<String, Object> verifyDisabled(Map<String, Object> ctx) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); return m; }\n"
+              + "    public Map<String, Object> verifyEnabled(Map<String, Object> ctx) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); return m; }\n"
+              + "    public Map<String, Object> rollback(Map<String, Object> ctx, Map<String, Object> snap) { Map<String, Object> m = new LinkedHashMap<String, Object>(); m.put(\"ok\", false); m.put(\"code\", \"ADAPTER_NOT_IMPLEMENTED\"); return m; }\n"
               + "}\n"
         );
         return skeleton;

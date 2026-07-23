@@ -29,6 +29,13 @@ final class Tier3LiveCapture implements ClassFileTransformer {
     private static final ConcurrentHashMap<String, byte[]> LIVE_BYTES =
             new ConcurrentHashMap<String, byte[]>();
 
+    /** S12: Contador de generacion de capturas para aislar estados entre toggles. */
+    private static final java.util.concurrent.atomic.AtomicLong captureGeneration =
+            new java.util.concurrent.atomic.AtomicLong(1);
+
+    static long getCaptureGeneration() { return captureGeneration.get(); }
+    static void bumpCaptureGeneration() { captureGeneration.incrementAndGet(); }
+
     /** nombres internos JVM (slash) a vigilar; mutable en caliente. */
     private static volatile Set<String> watchSet = Collections.emptySet();
 

@@ -700,24 +700,35 @@ final class Tier3DemixApply {
             return computePreserveShapeBytes(target, namespace);
         }
         if (mode == Tier3MixinAudit.DemixMode.REPLAY) {
-            return computeReplayBytes(target, cls, namespace);
+            ByteResult res = computeReplayBytes(target, cls, namespace);
+            if (!res.ok && ("BASE_BYTES_MISSING".equals(res.code) || "REPLAY_BYTES_MISSING".equals(res.code))) {
+                // S6 Fallback: resolver via PRESERVE_SHAPE si faltan bytes base
+                return computePreserveShapeBytes(target, namespace);
+            }
+            return res;
         }
-        return computeResetBytes(target);
+        ByteResult res = computeResetBytes(target);
+        if (!res.ok && "BASE_BYTES_MISSING".equals(res.code)) {
+            // S6 Fallback: resolver via PRESERVE_SHAPE si faltan bytes base
+            return computePreserveShapeBytes(target, namespace);
+        }
+        return res;
     }
 
     private static ByteResult computePreserveShapeBytes(String target, String victimNs) {
         byte[] liveBytes = Tier3LiveCapture.get(target);
-        byte[] baseBytes = Tier3MixinAudit.baseBytes(target);
         if (liveBytes == null) {
             return ByteResult.fail("LIVE_BYTES_MISSING", "Tier3LiveCapture no tiene bytes vivos capturados de " + target);
         }
+        byte[] baseBytes = Tier3MixinAudit.baseBytes(target);
         if (baseBytes == null) {
-            return ByteResult.fail("BASE_BYTES_MISSING", "No hay bytes base (pre-mixin) capturados de " + target);
+            // S6: Si faltan bytes base pre-mixin, usar liveBytes como base de forma
+            baseBytes = liveBytes;
         }
         Set<String> excludeSet = Tier3MixinAudit.mixinClassNamesForTarget(victimNs, target, Boot.modRoots);
         Tier3ShapePreservingDemix.Outcome outcome = Tier3ShapePreservingDemix.synthesize(target, liveBytes, baseBytes, excludeSet);
         if (!outcome.ok) {
-            return ByteResult.fail("SHAPE_PRESERVE_SYNTHESIS_FAILED", outcome.error);
+            return ByteResult.fail("PRESERVE_SHAPE_UNAVAILABLE", outcome.error);
         }
         Map<String, Object> detail = new LinkedHashMap<String, Object>();
         detail.put("model", "preserve_shape_v1");

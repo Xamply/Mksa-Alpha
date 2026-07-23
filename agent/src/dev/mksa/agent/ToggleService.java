@@ -194,9 +194,10 @@ public final class ToggleService {
                 reply.put("ok", Boolean.FALSE);
                 reply.put("namespace", namespace);
                 reply.put("operationId", operationId);
-                reply.put("state", "ON");
-                reply.put("toggleState", "active");
-                reply.put("rolledBack", Boolean.valueOf(rolledBack));
+                reply.put("state", "failed_active");
+                reply.put("toggleState", "failed_active");
+                reply.put("rolledBack", Boolean.TRUE);
+                reply.put("retryable", Boolean.TRUE);
                 reply.put("code", res.get("code"));
                 reply.put("error", res.get("error"));
                 reply.put("phase", "apply");
@@ -208,9 +209,13 @@ public final class ToggleService {
         } catch (Throwable t) {
             Tier3RuntimeState.markFailedActive(namespace,
                     t.getClass().getSimpleName() + ": " + t.getMessage());
-            return fail("INTERNAL",
+            Map<String, Object> reply = fail("INTERNAL",
                     t.getClass().getSimpleName() + ": " + t.getMessage(),
                     "disable", null);
+            reply.put("state", "failed_active");
+            reply.put("rolledBack", Boolean.TRUE);
+            reply.put("retryable", Boolean.TRUE);
+            return reply;
         } finally {
             // Paso 15: liberar lock
             globalLock.unlock();

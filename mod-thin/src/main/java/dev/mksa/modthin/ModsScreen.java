@@ -167,16 +167,16 @@ public final class ModsScreen extends class_437 {
         this.method_37063(this.tierToggleBtn);
 
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        // S1: La UI nunca decide capacidad tecnica. Solo ON + no busy = Desactivar,
-        // OFF verificado + no busy = Restaurar. Sin tier, supportedDisable, ni whitelist.
-        boolean disableActive = !busy && sel != null && "active".equalsIgnoreCase(sel.toggleState);
-        boolean enableActive  = !busy && sel != null && "inactive_verified".equalsIgnoreCase(sel.toggleState);
+        // S1 & S2: La UI permite desactivar si esta active o failed_active (reintentar).
+        boolean disableActive = !busy && sel != null && ("active".equalsIgnoreCase(sel.toggleState) || "failed_active".equalsIgnoreCase(sel.toggleState));
+        boolean enableActive  = !busy && sel != null && ("inactive_verified".equalsIgnoreCase(sel.toggleState) || "failed_inactive".equalsIgnoreCase(sel.toggleState));
 
         int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
         int actY = panelBottom + 6;
         int actionGap = 6;
         int actionW = (sideW - actionGap) / 2;
-        this.disableBtn = class_4185.method_46430(class_2561.method_30163("Desactivar"), b -> onDisable())
+        String disableBtnLabel = (sel != null && "failed_active".equalsIgnoreCase(sel.toggleState)) ? "Reintentar" : "Desactivar";
+        this.disableBtn = class_4185.method_46430(class_2561.method_30163(disableBtnLabel), b -> onDisable())
                 .method_46434(sideX, actY, actionW, 22).method_46431();
         this.disableBtn.field_22763 = disableActive;
 
@@ -567,9 +567,9 @@ public final class ModsScreen extends class_437 {
 
     private void onDisable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        // S1: sin runtime_unsupported — la UI no decide capacidad.
+        // S1 & S2: sin runtime_unsupported; permite active o failed_active para reintentos.
         if (sel == null || busy) return;
-        if (!"active".equalsIgnoreCase(sel.toggleState)) return;
+        if (!"active".equalsIgnoreCase(sel.toggleState) && !"failed_active".equalsIgnoreCase(sel.toggleState)) return;
         final String ns = sel.id;
         final String name = sel.name;
         busy = true; rebuild();
@@ -592,9 +592,8 @@ public final class ModsScreen extends class_437 {
 
     private void onEnable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        // S1: sin runtime_unsupported — la UI no decide capacidad.
         if (sel == null || busy) return;
-        if (!"inactive_verified".equalsIgnoreCase(sel.toggleState)) return;
+        if (!"inactive_verified".equalsIgnoreCase(sel.toggleState) && !"failed_inactive".equalsIgnoreCase(sel.toggleState)) return;
         runAction(sel.id, false);
     }
 
@@ -732,9 +731,23 @@ public final class ModsScreen extends class_437 {
                 } else {
                     busy = false;
                     bannerError = true;
-                    banner = verb + " falló: "
-                            + (r.error != null ? r.error : (r.code != null ? r.code : "desconocido"));
-                    rebuild();
+                    if (r.retryable || r.rolledBack) {
+                        banner = "No se aplicó. El mod '" + ns + "' sigue activo. Puedes volver a intentarlo.";
+                    } else {
+                        banner = verb + " falló: "
+                                + (r.error != null ? r.error : (r.code != null ? r.code : "desconocido"));
+                    }
+                    // S14: Refrescar la lista para actualizar el estado del boton a Reintentar
+                    new Thread(() -> {
+                        BridgeProxy.ListResult lr = BridgeProxy.listMods();
+                        client.execute(() -> {
+                            if (lr.ok) {
+                                allEntries = filterToMods(lr.mods);
+                                refilter();
+                            }
+                            rebuild();
+                        });
+                    }, "MksaThin-refresh-error").start();
                 }
             });
         }, "MksaThin-" + verb).start();

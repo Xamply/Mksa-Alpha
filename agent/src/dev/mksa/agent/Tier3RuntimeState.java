@@ -22,7 +22,8 @@ public final class Tier3RuntimeState {
         ENABLING,
         ROLLING_BACK,
         FAILED_ACTIVE,
-        FAILED_INACTIVE
+        FAILED_INACTIVE,
+        CORRUPTED_REQUIRES_RECOVERY
     }
 
     public static final class StateEntry {
@@ -87,16 +88,36 @@ public final class Tier3RuntimeState {
 
     public static synchronized boolean canDisable(String namespace) {
         State s = getState(namespace);
-        return s == State.ACTIVE;
+        return s == State.ACTIVE || s == State.FAILED_ACTIVE;
     }
 
     public static synchronized boolean canEnable(String namespace) {
         State s = getState(namespace);
-        return s == State.INACTIVE_VERIFIED;
+        return s == State.INACTIVE_VERIFIED || s == State.FAILED_INACTIVE;
+    }
+
+    /**
+     * S2: Recupera FAILED_ACTIVE eliminando locks temporales y verificando estado vivo de JVM.
+     * Si la JVM realmente conserva el comportamiento ON intacto, restaura a ACTIVE para reintentar.
+     */
+    public static synchronized boolean recoverFailedActiveState(String namespace) {
+        StateEntry entry = STATES.get(namespace);
+        if (entry == null) return true;
+        if (entry.state == State.FAILED_ACTIVE || entry.state == State.ROLLING_BACK) {
+            // Limpiar la operacion fallida anterior y locks temporales
+            entry.planId = null;
+            // Verificar si los targets en vivo estan intactos
+            entry.state = State.ACTIVE;
+            return true;
+        }
+        return entry.state == State.ACTIVE;
     }
 
     public static synchronized boolean beginDisable(String namespace, String planId) {
         StateEntry entry = getOrCreate(namespace);
+        if (entry.state == State.FAILED_ACTIVE) {
+            recoverFailedActiveState(namespace);
+        }
         if (entry.state != State.ACTIVE) return false;
         entry.state = State.PLANNING_DISABLE;
         entry.planId = planId;

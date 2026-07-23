@@ -1233,6 +1233,23 @@ final class Tier3MixinAudit {
                 // quedaba mas conservador de lo necesario, no solo mal-acotado.
                 // configPluginPresent/configPluginSimple se siguen exponiendo como
                 // diagnostico informativo (ver buildDemixPlan), nunca escondidos.
+                if (!reasons.isEmpty()) {
+                    // S7 & S8: Si el problema es una interfaz o campo @Unique sin verificar,
+                    // usar PRESERVE_SHAPE como modo preferido para conservar la forma sin bloquear.
+                    boolean canUsePreserveShape = true;
+                    for (String r : reasons) {
+                        if (!"unique_field_safety_unverified".equals(r) &&
+                            !"external_shape_consumer_unverified".equals(r)) {
+                            canUsePreserveShape = false;
+                            break;
+                        }
+                    }
+                    if (canUsePreserveShape) {
+                        out.put(target, new TargetClassification(DemixMode.PRESERVE_SHAPE, Collections.<String>emptyList()));
+                        continue;
+                    }
+                }
+
                 if (!hasCoOwner) {
                     out.put(target, reasons.isEmpty()
                             ? new TargetClassification(DemixMode.RESET, Collections.<String>emptyList())

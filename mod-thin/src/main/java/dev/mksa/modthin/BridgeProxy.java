@@ -318,6 +318,7 @@ final class BridgeProxy {
         r.phase = asString(m.get("phase"));
         r.target = asString(m.get("target"));
         r.rolledBack = Boolean.TRUE.equals(m.get("rolledBack"));
+        r.retryable = Boolean.TRUE.equals(m.get("retryable"));
         r.targets = asLong(m.get("targets"));
         Object metricsObj = m.get("metrics");
         if (metricsObj instanceof Map) r.metrics = (Map<String, Object>) metricsObj;
@@ -393,6 +394,7 @@ final class BridgeProxy {
         String mechanism;          // mechanism used (tier3_preserve_shape, etc.)
         boolean rollbackAvailable; // whether rollback data is available
         boolean rolledBack;        // whether a rollback was performed on failure
+        boolean retryable;         // whether the action can be retried cleanly
         String phase;              // phase where error occurred (if error)
         String target;             // target where error occurred (if error)
         long targets;              // number of targets processed

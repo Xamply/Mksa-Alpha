@@ -3282,12 +3282,25 @@ public final class Ledger implements LedgerSink {
             }
               Object semantic = m.get("semantic");
               if (semantic instanceof Map) e.put("semantic", semantic);
-              boolean running = true;
-              if (nsList instanceof List) {
-                  for (Object o : (List<?>) nsList) {
+            Object modIdObj = m.get("id");
+            String modId = (modIdObj instanceof String) ? (String) modIdObj : null;
+            boolean running = true;
+            if (modId != null && vetoed.contains(modId)) {
+                running = false;
+            }
+            if (nsList instanceof List) {
+                for (Object o : (List<?>) nsList) {
                     if (o != null && vetoed.contains(String.valueOf(o))) { running = false; break; }
                 }
             }
+
+            if (modId != null) {
+                Tier3RuntimeState.State st = Tier3RuntimeState.getState(modId);
+                if (st == Tier3RuntimeState.State.INACTIVE_VERIFIED) {
+                    running = false;
+                }
+            }
+
             e.put("running", running);
             Object tier = m.get("tier");
             e.put("supportedDisable", tier instanceof Integer && ((Integer) tier).intValue() >= 1);
@@ -3298,54 +3311,50 @@ public final class Ledger implements LedgerSink {
             String toggleMechanism = null;
             String toggleError = null;
 
+            if (modId != null) {
+                Tier3RuntimeState.State state = Tier3RuntimeState.getState(modId);
+                if (state != null) {
+                    switch (state) {
+                        case ACTIVE:
+                            toggleState = "active";
+                            break;
+                        case INACTIVE_VERIFIED:
+                            toggleState = "inactive_verified";
+                            break;
+                        case DISABLING:
+                            toggleState = "disabling";
+                            toggleCapability = "busy";
+                            break;
+                        case ENABLING:
+                            toggleState = "enabling";
+                            toggleCapability = "busy";
+                            break;
+                        case ROLLING_BACK:
+                            toggleState = "rolling_back";
+                            toggleCapability = "reverting";
+                            break;
+                        case FAILED_ACTIVE:
+                            toggleState = "failed_active";
+                            toggleCapability = "retryable";
+                            toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
+                            break;
+                        case FAILED_INACTIVE:
+                            toggleState = "failed_inactive";
+                            toggleCapability = "retryable";
+                            toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
+                            break;
+                        case CORRUPTED_REQUIRES_RECOVERY:
+                            toggleState = "corrupted";
+                            toggleCapability = "recovery_required";
+                            toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
+                            break;
+                    }
+                }
+            }
+
             if (tier instanceof Integer) {
                 int tierVal = ((Integer) tier).intValue();
                 if (tierVal >= 3) {
-                    Object modIdObj = m.get("id");
-                    if (modIdObj instanceof String) {
-                        String modId = (String) modIdObj;
-                        Tier3RuntimeState.State state = Tier3RuntimeState.getState(modId);
-                        if (state != null) {
-                            switch (state) {
-                                case ACTIVE:
-                                    toggleState = "active";
-                                    break;
-                                case INACTIVE_VERIFIED:
-                                    toggleState = "inactive_verified";
-                                    break;
-                                case DISABLING:
-                                    toggleState = "disabling";
-                                    toggleCapability = "busy";
-                                    break;
-                                case ENABLING:
-                                    toggleState = "enabling";
-                                    toggleCapability = "busy";
-                                    break;
-                                case PLANNING_DISABLE:
-                                    toggleState = "planning_disable";
-                                    toggleCapability = "analyzing";
-                                    break;
-                                case PLANNING_ENABLE:
-                                    toggleState = "planning_enable";
-                                    toggleCapability = "analyzing";
-                                    break;
-                                case ROLLING_BACK:
-                                    toggleState = "rolling_back";
-                                    toggleCapability = "busy";
-                                    break;
-                                case FAILED_ACTIVE:
-                                    toggleState = "active";
-                                    toggleCapability = "ready";
-                                    toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
-                                    break;
-                                case FAILED_INACTIVE:
-                                    toggleState = "inactive_verified";
-                                    toggleCapability = "ready";
-                                    toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
-                                    break;
-                            }
-                        }
-                    }
                     toggleMechanism = "tier3_demix";
                 } else if (tierVal >= 2) {
                     toggleMechanism = "tier2_runtime";
@@ -3354,6 +3363,27 @@ public final class Ledger implements LedgerSink {
                 } else {
                     toggleMechanism = "tier0_data";
                 }
+            }
+
+            if (modId != null) {
+                String ns = modId;
+                List<String> categories = new ArrayList<String>();
+                if (tier instanceof Integer) {
+                    int tVal = ((Integer) tier).intValue();
+                    if (tVal == 0) categories.add("T0_DATA");
+                    else if (tVal == 1) categories.add("T1_REGISTRY");
+                    else if (tVal == 2) categories.add("T2_RUNTIME");
+                    else if (tVal >= 3) categories.add("T3_BYTECODE");
+                }
+                if ("waystones".equals(ns) || "biomesoplenty".equals(ns)) {
+                    categories.add("DEPENDENT");
+                    categories.add("CO_OWNER");
+                } else if ("balm".equals(ns) || "terrablender".equals(ns)) {
+                    categories.add("CO_OWNER");
+                } else if ("connectedglass".equals(ns)) {
+                    categories.add("NO_ACTIVE_SURFACE");
+                }
+                e.put("behavioralCategories", categories);
             }
 
             e.put("toggleState", toggleState);
@@ -3443,10 +3473,9 @@ public final class Ledger implements LedgerSink {
         try {
             Map<String, Object> mod = findModByNamespace(ns);
             Integer tier = modTier(mod);
-            // S4: Tier 3 delega al ToggleService. Sin gate canLowerDecision.
+            // S4: Tier 3 delega al GroupToggleService para transacciones grupales y dependencias.
             if (tier != null && tier.intValue() >= 3) {
-                Map<String, Object> r = ToggleService.INSTANCE.disable(ns);
-                return r;
+                return GroupToggleService.INSTANCE.disableGroup(ns);
             }
             String path = modThinRestorePath(ns);
             ensureParent(path);
@@ -3462,12 +3491,10 @@ public final class Ledger implements LedgerSink {
 
     private Map<String, Object> enableOne(String ns) {
         try {
-            // S4: Si hay records T3 desactivados, delegar al ToggleService.
-            List<Tier3DemixApply.DisabledTargetRecord> t3records =
-                    Tier3DemixApply.disabledRecordsForNamespace(ns);
-            if (t3records != null && !t3records.isEmpty()) {
-                Map<String, Object> r = ToggleService.INSTANCE.enable(ns);
-                return r;
+            Map<String, Object> mod = findModByNamespace(ns);
+            Integer tier = modTier(mod);
+            if (tier != null && tier.intValue() >= 3) {
+                return GroupToggleService.INSTANCE.enableGroup(ns);
             }
             String path = modThinRestorePath(ns);
             if (!new File(path).isFile()) {

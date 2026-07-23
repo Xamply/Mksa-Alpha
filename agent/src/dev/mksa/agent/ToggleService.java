@@ -117,16 +117,20 @@ public final class ToggleService {
             // Paso 3: descubrir targets y crear plan (filtrado solo a targets cargados en JVM)
             Set<String> targetSet = Tier3MixinAudit.scanTargets(namespace);
             if (targetSet == null || targetSet.isEmpty()) {
-                // S3: Si no hay targets cargados en la JVM para este mod, no es un error fatal.
-                // El mod permanece ACTIVE y retryable.
+                // Si no hay targets cargados en la JVM para este mod (ej. Connected Glass / NoPause),
+                // transicionar el estado a INACTIVE_VERIFIED para que la UI deshabilite el botón Desactivar.
+                Tier3RuntimeState.commitDisable(namespace, Collections.<String, byte[]>emptyMap(),
+                        Collections.<String, byte[]>emptyMap(), Collections.<String, String>emptyMap(),
+                        Collections.<String, String>emptyMap(), Collections.<String>emptyList(),
+                        System.currentTimeMillis(), Collections.<String>emptySet());
                 Map<String, Object> reply = new LinkedHashMap<String, Object>();
-                reply.put("ok", Boolean.FALSE);
+                reply.put("ok", Boolean.TRUE);
                 reply.put("namespace", namespace);
-                reply.put("state", "ACTIVE");
-                reply.put("toggleState", "active");
-                reply.put("code", "NO_LOADED_VICTIM_TARGETS");
-                reply.put("error", "No hay targets del mod cargados actualmente en la JVM");
-                reply.put("retryable", Boolean.TRUE);
+                reply.put("state", "INACTIVE_VERIFIED");
+                reply.put("toggleState", "inactive_verified");
+                reply.put("code", "NO_RUNTIME_TARGETS");
+                reply.put("error", "Sin superficies runtime activas cargadas en esta sesion");
+                reply.put("retryable", Boolean.FALSE);
                 reply.put("rolledBack", Boolean.FALSE);
                 return reply;
             }
@@ -265,11 +269,14 @@ public final class ToggleService {
                 // Fallback a re-scan si no hay registros (compat)
                 Set<String> scanned = Tier3MixinAudit.scanTargets(namespace);
                 if (scanned == null || scanned.isEmpty()) {
-                    Tier3RuntimeState.markFailedInactive(namespace,
-                            "Sin targets guardados ni descubiertos para " + namespace);
-                    return fail("NO_TARGETS",
-                            "No hay targets registrados para '" + namespace + "'",
-                            null, null);
+                    Tier3RuntimeState.commitEnable(namespace);
+                    Map<String, Object> reply = new LinkedHashMap<String, Object>();
+                    reply.put("ok", Boolean.TRUE);
+                    reply.put("namespace", namespace);
+                    reply.put("state", "ACTIVE");
+                    reply.put("toggleState", "active");
+                    reply.put("code", "NO_RUNTIME_TARGETS");
+                    return reply;
                 }
                 targets = scanned.toArray(new String[0]);
             }

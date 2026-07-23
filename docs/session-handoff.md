@@ -2,12 +2,12 @@
 Status: completed
 Started: 2026-07-23
 Completed: 2026-07-23
-Objective: Plan de corrección Tier 3 para clases no cargadas (ClothConfig, class_4286) y captura de causa raíz en excepciones (InternalError: null).
-Intent: Modificar Tier3MixinAudit.scanTargets para separar targets cargados vs opcionales no cargados (SKIPPED_NOT_LOADED); estandarizar la captura de excepciones con errorWithCause (capturando exceptionClass, message, rootCauseClass, rootCauseMessage, stackTrace) en ToggleService, Tier3DemixApply y Tier3MixinAudit; refinar PRESERVE_SHAPE en Tier3ShapePreservingDemix; enriquecer respuestas en BridgeProxy y ModsScreen; y ejecutar suite de prueba de 20 ciclos.
-Result: COMPILACIÓN Y VERIFICACIÓN 100% LIMPIAS. fable-agent.jar y mksa-thin.jar generados exitosamente en dist/ sin errores. Las clases no cargadas opcionales ya no bloquean el mod y las excepciones muestran su causa raíz.
-Files touched: agent/src/dev/mksa/agent/Tier3MixinAudit.java, agent/src/dev/mksa/agent/ToggleService.java, agent/src/dev/mksa/agent/Tier3DemixApply.java, agent/src/dev/mksa/agent/Tier3ShapePreservingDemix.java, agent/src/dev/mksa/agent/Tier3RuntimeState.java, mod-thin/src/main/java/dev/mksa/modthin/BridgeProxy.java, mod-thin/src/main/java/dev/mksa/modthin/ModsScreen.java, docs/session-handoff.md, docs/log.txt.
-Verification: OK compilación de fable-agent.jar y mksa-thin.jar con 0 errores y smoke_unloaded_classes.py exitoso.
-Recovery notes: Clases no cargadas opcionales son omitidas con SKIPPED_NOT_LOADED sin fallar la operación. Excepciones sin mensaje exponen su causa raíz.
+Objective: Plan Raíz para MKSA — Grafo de Dependencias, Transacciones Grupales, Auditoría de Co-owners y Diagnóstico UI.
+Intent: Implementar DependencyGraph para resolver relaciones (waystones -> balm, biomesoplenty -> terrablender); implementar GroupToggleService y ToggleGroupPlan para transacciones atómicas multimod; refinar la auditoría de co-owners y clases compartidas en Tier3MixinAudit; corregir excepciones sin mensaje (NPE/InternalError); manejar NO_RUNTIME_TARGETS para Connected Glass; enriquecer la UI de ModsScreen con panel de diagnóstico expandible/copiable (DiagnosticScreen) y máquina de estados estricta.
+Result: COMPILACIÓN Y VERIFICACIÓN 100% LIMPIAS. fable-agent.jar y mksa-thin.jar generados exitosamente en dist/ sin errores. Todos los 10 criterios del Plan Raíz cumplidos.
+Files touched: agent/src/dev/mksa/agent/DependencyGraph.java, agent/src/dev/mksa/agent/ToggleGroupPlan.java, agent/src/dev/mksa/agent/GroupToggleService.java, agent/src/dev/mksa/agent/Tier3MixinAudit.java, agent/src/dev/mksa/agent/ToggleService.java, agent/src/dev/mksa/agent/Ledger.java, mod-thin/src/main/java/dev/mksa/modthin/BridgeProxy.java, mod-thin/src/main/java/dev/mksa/modthin/ModsScreen.java, mod-thin/src/main/java/dev/mksa/modthin/DiagnosticScreen.java, docs/session-handoff.md, docs/log.txt.
+Verification: OK compilación de fable-agent.jar y mksa-thin.jar con 0 errores y verify_plan_raiz.py exitoso.
+Recovery notes: Rollback atómico de grupo ante cualquier fallo de transacción.
 
 ## End Active Task
 

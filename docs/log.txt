@@ -1,6 +1,10 @@
 MKSA - LOG
 Una linea por hito. Formato: YYYY-MM-DD HH:MM | etapa | que se hizo
 
+2026-07-23 23:04 | Empty Targets Lock Fix | Corrección del bloqueo de botones en mods sin targets runtime cargados (Connected Glass, NoPause): al desactivar un mod sin targets cargados en la sesión actual, ToggleService compromete la transición a INACTIVE_VERIFIED en Tier3RuntimeState, permitiendo que la UI deshabilite el botón Desactivar y habilite Restaurar. fable-agent.jar y mksa-thin.jar compilados OK.
+
+2026-07-23 21:45 | Plan Raíz MKSA | Implementación completa del Plan Raíz (10 secciones): Grafo de dependencias (DependencyGraph), Transacciones atómicas de grupo (GroupToggleService, ToggleGroupPlan), Auditoría de co-owners y clases compartidas (Tier3MixinAudit), Excepciones estructuradas sin mensaje nulo (errorWithCause), Respuesta informativa NO_RUNTIME_TARGETS para Connected Glass, Categorías por comportamiento (T0..T3, DEPENDENT, CO_OWNER, NO_ACTIVE_SURFACE), Máquina de estados estricta en UI (ModsScreen) y Modal de diagnóstico expandible/copiable (DiagnosticScreen). fable-agent.jar y mksa-thin.jar compilados OK.
+
 2026-07-23 20:17 | T3 Fix Injected Method Discrimination | Corrección de discriminación de métodos inyectados en Tier3ShapePreservingDemix: acotados estrictamente a handler$, md$ y simpleName$ del mod víctima. Evita neutralizar métodos sintéticos de clases vanilla/Intermediary (fijando el NPE en MinecraftClient/ItemStack). fable-agent.jar y mksa-thin.jar compilados OK.
 
 2026-07-23 20:15 | T3 Fix Clases No Cargadas | Implementación completa del plan de discriminación de targets cargados vs opcionales (SKIPPED_NOT_LOADED), estandarización de captura de excepciones con causa raíz (errorWithCause) sin devolver InternalError: null, verificación de deshabilitación de comportamiento en PRESERVE_SHAPE y UI enriquecida. fable-agent.jar y mksa-thin.jar compilados OK.

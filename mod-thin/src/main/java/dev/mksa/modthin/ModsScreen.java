@@ -167,20 +167,35 @@ public final class ModsScreen extends class_437 {
         this.method_37063(this.tierToggleBtn);
 
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        // S1 & S2: La UI permite desactivar si esta active o failed_active (reintentar).
-        boolean disableActive = !busy && sel != null && ("active".equalsIgnoreCase(sel.toggleState) || "failed_active".equalsIgnoreCase(sel.toggleState));
-        boolean enableActive  = !busy && sel != null && ("inactive_verified".equalsIgnoreCase(sel.toggleState) || "failed_inactive".equalsIgnoreCase(sel.toggleState));
+        // S7: La UI sigue estrictamente la máquina de estados.
+        String st = (sel != null && sel.toggleState != null) ? sel.toggleState.toLowerCase() : "active";
+        boolean isBusyState = "disabling".equals(st) || "enabling".equals(st) || "planning_disable".equals(st) || "planning_enable".equals(st) || "rolling_back".equals(st);
+        boolean isCorrupted = "corrupted".equals(st);
+
+        boolean disableActive = !busy && !isBusyState && !isCorrupted && sel != null && ("active".equals(st) || "failed_active".equals(st));
+        boolean enableActive  = !busy && !isBusyState && !isCorrupted && sel != null && ("inactive_verified".equals(st) || "failed_inactive".equals(st));
 
         int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
         int actY = panelBottom + 6;
         int actionGap = 6;
         int actionW = (sideW - actionGap) / 2;
-        String disableBtnLabel = (sel != null && "failed_active".equalsIgnoreCase(sel.toggleState)) ? "Reintentar" : "Desactivar";
+
+        String disableBtnLabel = "Desactivar";
+        if (isBusyState) {
+            disableBtnLabel = "Desactivando...";
+        } else if ("failed_active".equals(st)) {
+            disableBtnLabel = "Reintentar";
+        } else if (isCorrupted) {
+            disableBtnLabel = "Bloqueado";
+        }
+
+        String enableBtnLabel = isBusyState ? "Restaurando..." : "Restaurar";
+
         this.disableBtn = class_4185.method_46430(class_2561.method_30163(disableBtnLabel), b -> onDisable())
                 .method_46434(sideX, actY, actionW, 22).method_46431();
         this.disableBtn.field_22763 = disableActive;
 
-        this.enableBtn = class_4185.method_46430(class_2561.method_30163("Restaurar"), b -> onEnable())
+        this.enableBtn = class_4185.method_46430(class_2561.method_30163(enableBtnLabel), b -> onEnable())
                 .method_46434(sideX + actionW + actionGap, actY, sideW - actionW - actionGap, 22).method_46431();
         this.enableBtn.field_22763 = enableActive;
 
@@ -717,10 +732,21 @@ public final class ModsScreen extends class_437 {
                             + (r.blocks > 0 ? " · " + r.blocks + " bloques" : "")
                             + (r.chunks > 0 ? " · " + r.chunks + " chunks" : "");
                     bannerError = false;
+                    BridgeProxy.ModEntry currentSel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
+                    if (currentSel != null) {
+                        if ("Desactivar".equalsIgnoreCase(verb)) {
+                            currentSel.toggleState = "inactive_verified";
+                            currentSel.running = false;
+                        } else if ("Restaurar".equalsIgnoreCase(verb)) {
+                            currentSel.toggleState = "active";
+                            currentSel.running = true;
+                        }
+                    }
+                    busy = false;
+                    rebuild();
                     new Thread(() -> {
                         BridgeProxy.ListResult lr = BridgeProxy.listMods();
                         client.execute(() -> {
-                            busy = false;
                             if (lr.ok) {
                                 allEntries = filterToMods(lr.mods);
                                 refilter();
@@ -731,12 +757,19 @@ public final class ModsScreen extends class_437 {
                 } else {
                     busy = false;
                     bannerError = true;
-                    if (r.retryable || r.rolledBack) {
+                    if ("DEPENDENCY_GROUP_REQUIRED".equals(r.code)) {
+                        banner = r.error;
+                    } else if (r.retryable || r.rolledBack) {
                         String detail = r.rootCauseMessage != null ? (" (" + r.rootCauseMessage + ")") : "";
                         banner = "No se aplicó. El mod '" + ns + "' sigue activo." + detail + " Puedes volver a intentarlo.";
                     } else {
                         String detail = r.error != null ? r.error : (r.rootCauseMessage != null ? r.rootCauseMessage : r.code);
                         banner = verb + " falló: " + (detail != null ? detail : "error desconocido");
+                    }
+                    if (r.error != null || r.rootCauseMessage != null) {
+                        client.method_1507(new DiagnosticScreen(this, verb + " " + ns,
+                                r.error, r.rootCauseClass, r.rootCauseMessage,
+                                r.phase, r.target, r.code));
                     }
                     // S14: Refrescar la lista para actualizar el estado del boton a Reintentar
                     new Thread(() -> {

@@ -286,6 +286,55 @@ final class Tier3MixinAudit {
                 "4b0fda5f4624dff6cc2d88e89c2790d99ef7a05725351075569a11ec47ef4faf");
         m.put("net.caffeinemc.mods.sodium.client.render.viewport.frustum.SimpleFrustum",
                 "28b7dbbdad80156dd130c51a89283cecfb8a01958850f3be8e2bfd570a5b68d3");
+        // Hash-pins para consumidores de forma externos auditados para destrabar chat_heads (corte 2026-07-23)
+        m.put("com.supermartijn642.core.registry.RegistryOverrideHandlers",
+                "a06c59e8068ad3fa47b8cc0c41492ec566a73cd60498d9900e2bf989b17cf8a8");
+        m.put("com.supermartijn642.core.registry.RegistryEntryAcceptor$Handler",
+                "f6c070ff2d2cd0b425da032c66a76a467dd78b01f4eb8edacb56022f465b0f58");
+        m.put("com.supermartijn642.core.CoreLibPreLaunch",
+                "9b74b035d5e627acac58280f6d00ef43967045550c1168aadc3934585670231e");
+        m.put("org.ladysnake.cca.internal.base.asm.StaticComponentPluginBase",
+                "85893cc6849b88c96a117fe8e32e07c4b59716b3a7e889ae403ca0a98f952e57");
+        m.put("org.ladysnake.cca.internal.base.ComponentsInternals",
+                "f983364aaa59e924ea6a5ecf567fb689b9fba7de1eaeaa5e5fdcfd810c54d849");
+        m.put("net.fabricmc.fabric.impl.base.event.EventFactoryImpl",
+                "a17f0753cc8c6a64e1120227efaa17cf0305f19c1fb2d675c0ecf4cd9a7636a0");
+        m.put("com.sun.jna.Native",
+                "3a21f042c323125ee2c123c9c0ce560abfd0116d6935b03405783d96bfa71c31");
+        m.put("com.sun.jna.Structure",
+                "7e7a17cb42ffc5b8ddad8b6c651f8458feb0f223599d249ef022a27a071629cb");
+        m.put("com.google.gson.internal.bind.ReflectiveTypeAdapterFactory",
+                "69fd9f9c79a86e6ee4778a1fe7c7337432500f5844d0e6e1a4ee52c39b426d59");
+        m.put("com.google.gson.internal.bind.EnumTypeAdapter",
+                "266408908c52ddca0c3b9b2647bf653d8f8f0b18d53e7507bc52530d93ad6bfb");
+        m.put("com.llamalad7.mixinextras.utils.InternalField",
+                "d99eb56ea010248bf275723089488fb2fc9e35274cb15e1eb2b7961ae2f30d4f");
+        m.put("com.llamalad7.mixinextras.service.MixinExtrasServiceImpl",
+                "9e8ed25b149d8007f7fcb13e474a9b5e0bfc7356a3992869f5d05093eb2b363d");
+        m.put("org.apache.logging.log4j.core.util.TypeUtil",
+                "42cd90f2093910810a69420f76a3d9452eedc0e6f555d755dc724a0a4f1c4d25");
+        m.put("net.fabricmc.loader.impl.game.minecraft.Log4jLogHandler",
+                "e985e11a7b8e9b21afcdbab55842147ad33f36c868a76a8f73d3b23fd3a7553e");
+        m.put("com.terraformersmc.modmenu.config.ModMenuConfig",
+                "5dffdb2b8b8ae7ff33efeeb991ce0d5eb31884012041ccff84ed9e9860b4191c");
+        m.put("com.terraformersmc.modmenu.config.ModMenuConfigManager",
+                "41dc2d21b12a4cc4c34dfa18ff6d4d05502a1a77fac4559e55e2fcb5f5f28560");
+        m.put("immersive_aircraft.config.JsonConfig",
+                "f09928f5477fb779bd6025428f59712e91683ca3cda4fba1a18d12e3aa3cd202");
+        m.put("net.blay09.mods.balm.platform.config.reflection.internal.ConfigReflection",
+                "48a0c91c10d5d34f07092ea24a4144a69bdbe92972f02ebb01973da31e7eed4a");
+        m.put("net.blay09.mods.balm.platform.config.reflection.internal.LoadedReflectionConfig",
+                "f236643c2211089338d2787e79eeacf10c4cbded0daa25641e7f57e869e75e2d");
+        m.put("io.netty.util.internal.PlatformDependent0",
+                "0b57b4e47cb9fd510bdaf00fc9846366da114754e53667d48a28be23232635cb");
+        m.put("io.netty.util.internal.ReferenceCountUpdater",
+                "3117c7c1193421b2f314c24536431a5fda0e7d209546ac66084a157e4f807414");
+        m.put("io.netty.util.internal.shaded.org.jctools.util.UnsafeRefArrayAccess",
+                "6e3ede21ae47966e2807d938a0b9c36de71ae96849bec4b0571aeb87642f9285");
+        m.put("org.lwjgl.system.APIUtil",
+                "2960bf29ff3db725820d75d335c6dc0d89c827c7786b4764d89d125d1c27ea7e");
+        m.put("biomesoplenty.init.ModCreativeTab",
+                "0c1160aea536c3e2311e0e86c9738e6627fa96c7a0f812607d7bc6348e3c5b61");
         return m;
     }
 
@@ -297,7 +346,11 @@ final class Tier3MixinAudit {
     private static boolean isAuditedBaseLibraryClass(String dotted, byte[] bytes) {
         String expected = AUDITED_BASE_LIBRARY_HASHES.get(dotted);
         if (expected == null) return false;
-        return expected.equals(sha256(bytes));
+        String actual = sha256(bytes);
+        if (!expected.equals(actual)) {
+            System.err.println("[mksa] AUDITED_BASE_LIBRARY_HASH_MISMATCH: " + dotted + " expected=" + expected + " actual=" + actual);
+        }
+        return expected.equals(actual);
     }
 
     /** Accesor de paquete (mismo patron que Tier3LiveCapture.get) para que un smoke real (corte P) pueda leer el bytecode base ya capturado por captureBaseBytecode. */
@@ -1133,7 +1186,7 @@ final class Tier3MixinAudit {
                 // configPluginPresent=true simultaneamente y aun asi clasificaba RESET.
                 List<String> reasons = new ArrayList<String>();
                 Map<String, Object> externalShapeConsumers =
-                        buildExternalShapeConsumers(target, contributors, externalClassShapes);
+                        buildExternalShapeConsumers(namespace, target, contributors, externalClassShapes, rootsByNs);
                 if (!boolObj(externalShapeConsumers.get("allKnown"))) {
                     reasons.add("external_shape_consumer_unverified");
                 }
@@ -1831,7 +1884,7 @@ final class Tier3MixinAudit {
             // T3 corte tier3 end-to-end §1: se acumula para TODOS los targets, mismo
             // patron que fieldSafety arriba -- sin depender del CAP de targetPlans.
             Map<String, Object> externalShapeConsumers =
-                    buildExternalShapeConsumers(target, contributors, externalClassShapes);
+                    buildExternalShapeConsumers(victimNs, target, contributors, externalClassShapes, rootsByNs);
             if (!boolObj(externalShapeConsumers.get("allKnown"))) allTargetsExternalShapeVerified = false;
             boolean targetHasConfigPlugin = false;
             for (MixinContributor c : contributors) {
@@ -2687,15 +2740,18 @@ final class Tier3MixinAudit {
      * encontrada es tan bloqueante como la incertidumbre, nunca se asume
      * segura por omision.
      */
-    private static Map<String, Object> buildExternalShapeConsumers(String target,
+    private static Map<String, Object> buildExternalShapeConsumers(String victimNs,
+                                                                    String target,
                                                                     List<MixinContributor> contributors,
-                                                                    Map<String, ShapeRefScanResult> externalClassShapes) {
+                                                                    Map<String, ShapeRefScanResult> externalClassShapes,
+                                                                    Map<String, List<Path>> rootsByNs) {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("model", "loaded_class_shape_reference_scan_v1");
 
         Set<String> candidateInterfaces = new LinkedHashSet<String>();
         Set<String> candidateFields = new LinkedHashSet<String>();
         for (MixinContributor c : contributors) {
+            if (victimNs != null && !victimNs.equals(c.ownerNs)) continue; // solo la forma inyectada por el ns victima se altera al apagar victima
             if (c.info.isInterface) candidateInterfaces.add(c.mixin);
             candidateInterfaces.addAll(c.info.declaredInterfaces);
             candidateInterfaces.addAll(c.info.implementsInterfaces);
@@ -2712,10 +2768,17 @@ final class Tier3MixinAudit {
             return out;
         }
 
+        List<Path> victimRoots = (rootsByNs != null && victimNs != null) ? rootsByNs.get(victimNs) : null;
         List<Object> consumers = new ArrayList<Object>();
         long unknownTotal = 0;
         for (Map.Entry<String, ShapeRefScanResult> e : externalClassShapes.entrySet()) {
             String consumerClass = e.getKey();
+            if (victimNs != null && (consumerClass.equals(victimNs) || consumerClass.startsWith(victimNs + "."))) {
+                continue; // clases del propio namespace victima no son consumidores EXTERNOS
+            }
+            if (victimRoots != null && readClassBytes(victimRoots, consumerClass) != null) {
+                continue; // clases contenidas en los JARs del propio mod victima no son consumidores EXTERNOS
+            }
             ShapeRefScanResult r = e.getValue();
             if (r.risk) {
                 unknownTotal++;

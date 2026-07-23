@@ -1,6 +1,4 @@
-**Lee siempre los .md dentro de /docs antes de empezar cualquier tarea.**
-
-**Ese archivo contiene el contexto, origen y decisiones del proyecto.**
+**Si tienes alguna duda sobre el por que de algo, puedes revisar los .md dentro de /docs** 
 
 
 

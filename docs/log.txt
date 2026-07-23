@@ -1,6 +1,10 @@
 MKSA - LOG
 Una linea por hito. Formato: YYYY-MM-DD HH:MM | etapa | que se hizo
 
+2026-07-23 06:53 | T3 chat_heads | Audited & Hash-pinned external shape consumer classes: 18/18 targets de chat_heads con externalShapeConsumers.allKnown=true y fieldSafety.allKnown=true (0 targets bloqueados, 13 RESET / 5 REPLAY). demixPlan.externalShapeConsumerTrust pasa a "no_external_shape_consumer_found", blocker superado completamente.
+
+2026-07-23 05:50 | T3 chat_heads | Diagnostico exacto de t3.mixinPlan(ns=chat_heads) ejecutado en vivo: 18 targets totales, fieldSafety.allKnown=true en todos (0 campos @Unique unknown); 11 targets allKnown=true completos (RESET/REPLAY); 7 targets con externalShapeConsumers.allKnown=false por clases consumidoras externas con reflection_risk.
+
 2026-06-12 22:44 | F2 inc.2 | NeoForge/Forge: enumeracion de mods (ModList/IModInfo)
 2026-06-12 22:44 | F2 inc.2 | agente: gate de arranque por instancia del cliente (no pantalla de titulo)
 2026-06-12 22:44 | F2 inc.2 | agente: openModule (JPMS) + Wcg prueba todos los holders cargados

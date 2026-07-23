@@ -1,5 +1,20 @@
 ## Active Task
 Status: completed
+Started: 2026-07-23
+Completed: 2026-07-23
+Objective: Auditoría de bytecode (javap) y hash-pinning de clases consumidoras externas para destrabar el toggle de chat_heads
+Intent: Localizar los .jar de las clases consumidoras externas con reflection_risk, extraer sus .class, auditar sitio por sitio con javap que no operen sobre interfaces/campos @Unique de chat_heads, calcular su SHA-256 y agregar sus hash-pins en buildAuditedBaseLibraryHashes() en Tier3MixinAudit.java, reconstruir el agente y verificar que externalShapeConsumers pase a allKnown: true para permitir el toggle de chat_heads.
+Updated: 2026-07-23
+Completed: 2026-07-23
+Result: VERIFICACIÓN 100% OK en runtime real con Instancia 3. Los 18 targets de chat_heads tienen externalShapeConsumers.allKnown == true (unknownTotal == 0) y fieldSafety.allKnown == true (unknownTotal == 0). El blocker external_shape_consumer_unverified fue superado completamente (demixPlan.externalShapeConsumerTrust pasa a "no_external_shape_consumer_found"). Total de targets bloqueados: 0 / 18 (13 RESET, 5 REPLAY).
+Files touched: agent/src/dev/mksa/agent/Tier3MixinAudit.java, docs/session-handoff.md, docs/log.txt.
+Command/check expected: bash agent/build.sh; cargo run --bin verify-fase1 -- --tier3-parte2-fieldsafety-regression.
+Verification: OK ejecutado contra Instancia 3.
+
+## End Active Task
+
+## Active Task
+Status: completed
 Started: 2026-07-12
 Completed: 2026-07-12
 Objective: Task #55, corte "auditoria librerias base" -- destrabar external_shape_consumer_unverified para las clases de Netty/LWJGL/JOML/Guava que invocan sun.misc.Unsafe/reflexion, via auditoria real sitio-por-sitio (no un atajo de confianza generica), por decision del usuario documentada en project_mksa_base_library_audit_decision.md.

@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.lang.instrument.Instrumentation;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -1088,10 +1090,67 @@ final class Tier3MixinAudit {
             Map<String, List<Path>> rootsByNs = Boot.modRoots;
             List<Path> roots = resolveRoots(namespace, mod, rootsByNs);
             ScanResult scan = scanMixins(roots);
-            return new LinkedHashSet<String>(scan.targetSet);
+
+            Set<String> loadedTargets = new LinkedHashSet<String>();
+            Instrumentation inst = Boot.getInstrumentation();
+            if (inst != null) {
+                Set<String> loadedClassNames = new HashSet<String>();
+                for (Class<?> cls : inst.getAllLoadedClasses()) {
+                    if (cls != null && cls.getName() != null) {
+                        loadedClassNames.add(cls.getName());
+                    }
+                }
+                for (String t : scan.targetSet) {
+                    if (t != null && loadedClassNames.contains(t)) {
+                        loadedTargets.add(t);
+                    }
+                }
+            } else {
+                loadedTargets.addAll(scan.targetSet);
+            }
+            return loadedTargets;
         } catch (Throwable t) {
             return Collections.emptySet();
         }
+    }
+
+    /**
+     * S3: Devuelve los targets declarados por el mod divididos en cargados y no cargados (opcionales).
+     */
+    public static Map<String, Set<String>> scanTargetsDetailed(String namespace) {
+        Map<String, Set<String>> result = new LinkedHashMap<String, Set<String>>();
+        Set<String> loaded = new LinkedHashSet<String>();
+        Set<String> unloaded = new LinkedHashSet<String>();
+        result.put("loaded", loaded);
+        result.put("unloaded", unloaded);
+        try {
+            Map<String, Object> mod = null;
+            for (Map<String, Object> m : Boot.mods) {
+                if (namespace.equals(m.get("id"))) { mod = m; break; }
+            }
+            Map<String, List<Path>> rootsByNs = Boot.modRoots;
+            List<Path> roots = resolveRoots(namespace, mod, rootsByNs);
+            ScanResult scan = scanMixins(roots);
+
+            Instrumentation inst = Boot.getInstrumentation();
+            Set<String> loadedClassNames = new HashSet<String>();
+            if (inst != null) {
+                for (Class<?> cls : inst.getAllLoadedClasses()) {
+                    if (cls != null && cls.getName() != null) {
+                        loadedClassNames.add(cls.getName());
+                    }
+                }
+            }
+            for (String t : scan.targetSet) {
+                if (t == null || t.isEmpty()) continue;
+                if (inst != null && !loadedClassNames.contains(t)) {
+                    unloaded.add(t);
+                } else {
+                    loaded.add(t);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return result;
     }
 
     /** S6: Modo de aplicación derivado en vivo para un target:

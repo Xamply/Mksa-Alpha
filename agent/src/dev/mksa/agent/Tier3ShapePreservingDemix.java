@@ -189,6 +189,13 @@ public final class Tier3ShapePreservingDemix {
                 dos.write(attributesData[i]);
             }
 
+            // S12: Si baseBytes == liveBytes (usado como fallback), exigir que la síntesis
+            // haya neutralizado al menos un método inyectado por la víctima para demostrar
+            // que el comportamiento del mod realmente se apagó.
+            if (neutralizedNames.isEmpty() && baseBytes == liveBytes) {
+                return Outcome.fail("PRESERVE_SHAPE_UNAVAILABLE: No se neutralizó ningún método inyectado en " + target);
+            }
+
             return Outcome.ok(baos.toByteArray(), neutralizedNames);
 
         } catch (Throwable t) {
@@ -199,20 +206,20 @@ public final class Tier3ShapePreservingDemix {
 
     private static boolean isVictimInjectedMethod(String name, String desc, Set<String> victimMixins) {
         if (name == null || name.isEmpty()) return false;
-        // Prefix dinamico derivado de los nombres simples de los mixins del mod victima
-        if (victimMixins != null) {
+        // 1. Coincidencia explícita con prefijos derivados de los mixins de la víctima
+        if (victimMixins != null && !victimMixins.isEmpty()) {
             for (String mixinClass : victimMixins) {
                 String simpleName = mixinClass;
                 int lastDot = mixinClass.lastIndexOf('.');
                 if (lastDot >= 0) simpleName = mixinClass.substring(lastDot + 1);
-                // Patrón Mixin estándar: SimpleName$methodName o simple_name$methodName
                 if (name.startsWith(simpleName + "$")) return true;
                 if (name.startsWith(simpleName.toLowerCase() + "$")) return true;
             }
         }
-        // Fallback genérico para métodos que contengan un signo $ precedido por nombres de mixin conocidos
-        // o métodos getter/setter de interfaz inyectados por mixins
-        if (name.contains("$") && !name.startsWith("lambda$") && !name.startsWith("access$")) {
+        // 2. Prefijos estándar de inyección de SpongePowered Mixin:
+        // - handler$... (inyectados por @Inject, @Redirect, @ModifyVariable, etc.)
+        // - md$... (métodos sintetizados de mixin)
+        if (name.startsWith("handler$") || name.startsWith("md$")) {
             return true;
         }
         return false;

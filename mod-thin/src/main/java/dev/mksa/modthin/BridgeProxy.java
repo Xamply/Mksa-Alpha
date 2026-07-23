@@ -320,6 +320,9 @@ final class BridgeProxy {
         r.rolledBack = Boolean.TRUE.equals(m.get("rolledBack"));
         r.retryable = Boolean.TRUE.equals(m.get("retryable"));
         r.targets = asLong(m.get("targets"));
+        r.exceptionClass = asString(m.get("exceptionClass"));
+        r.rootCauseClass = asString(m.get("rootCauseClass"));
+        r.rootCauseMessage = asString(m.get("rootCauseMessage"));
         Object metricsObj = m.get("metrics");
         if (metricsObj instanceof Map) r.metrics = (Map<String, Object>) metricsObj;
         return r;
@@ -397,6 +400,9 @@ final class BridgeProxy {
         boolean retryable;         // whether the action can be retried cleanly
         String phase;              // phase where error occurred (if error)
         String target;             // target where error occurred (if error)
+        String exceptionClass;     // class of exception if error
+        String rootCauseClass;     // root cause exception class
+        String rootCauseMessage;   // root cause exception message
         long targets;              // number of targets processed
         Map<String, Object> metrics; // before/after metrics (nullable)
     }

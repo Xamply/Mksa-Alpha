@@ -2,12 +2,12 @@
 Status: completed
 Started: 2026-07-23
 Completed: 2026-07-23
-Objective: Plan corregido para resolver los 3 errores Tier 3 (FAILED_ACTIVE recuperable, class_310 sin bytes base, class_1799 unique_field_safety_unverified).
-Intent: Implementar la máquina de estados recuperable de FAILED_ACTIVE en Tier3RuntimeState; rollback obligatorio en ToggleService; discriminación de isVictimTarget y resolveOffBytes con fallbacks a PRESERVE_SHAPE en Tier3MixinAudit/Tier3DemixApply; resolución de campos @Unique por target en Tier3MixinAudit con PRESERVE_SHAPE por defecto; aislamiento de capturas Tier 1/2 vs Tier 3; corrección de HotToggleAdapter skeletons; y suite de verificación.
-Result: COMPILACIÓN Y VERIFICACIÓN 100% LIMPIAS. fable-agent.jar y mksa-thin.jar generados exitosamente en dist/ sin errores. Los 3 errores corregidos de forma genérica para Waystones, Chat Heads y cualquier mod Tier 3 futuro.
-Files touched: agent/src/dev/mksa/agent/Tier3RuntimeState.java, agent/src/dev/mksa/agent/ToggleService.java, agent/src/dev/mksa/agent/Tier3MixinAudit.java, agent/src/dev/mksa/agent/Tier3DemixApply.java, agent/src/dev/mksa/agent/Tier3LiveCapture.java, agent/src/dev/mksa/agent/HotToggleAdapter.java, agent/src/dev/mksa/agent/Tier3AdapterRegistry.java, mod-thin/src/main/java/dev/mksa/modthin/BridgeProxy.java, mod-thin/src/main/java/dev/mksa/modthin/ModsScreen.java, docs/session-handoff.md, docs/log.txt.
-Verification: OK compilación de fable-agent.jar y mksa-thin.jar con 0 errores y smoke_3_errors.py exitoso.
-Recovery notes: FAILED_ACTIVE recupera automáticamente revisando los hashes de clases cargadas contra LIVE_BYTES y reiniciando el plan.
+Objective: Plan de corrección Tier 3 para clases no cargadas (ClothConfig, class_4286) y captura de causa raíz en excepciones (InternalError: null).
+Intent: Modificar Tier3MixinAudit.scanTargets para separar targets cargados vs opcionales no cargados (SKIPPED_NOT_LOADED); estandarizar la captura de excepciones con errorWithCause (capturando exceptionClass, message, rootCauseClass, rootCauseMessage, stackTrace) en ToggleService, Tier3DemixApply y Tier3MixinAudit; refinar PRESERVE_SHAPE en Tier3ShapePreservingDemix; enriquecer respuestas en BridgeProxy y ModsScreen; y ejecutar suite de prueba de 20 ciclos.
+Result: COMPILACIÓN Y VERIFICACIÓN 100% LIMPIAS. fable-agent.jar y mksa-thin.jar generados exitosamente en dist/ sin errores. Las clases no cargadas opcionales ya no bloquean el mod y las excepciones muestran su causa raíz.
+Files touched: agent/src/dev/mksa/agent/Tier3MixinAudit.java, agent/src/dev/mksa/agent/ToggleService.java, agent/src/dev/mksa/agent/Tier3DemixApply.java, agent/src/dev/mksa/agent/Tier3ShapePreservingDemix.java, agent/src/dev/mksa/agent/Tier3RuntimeState.java, mod-thin/src/main/java/dev/mksa/modthin/BridgeProxy.java, mod-thin/src/main/java/dev/mksa/modthin/ModsScreen.java, docs/session-handoff.md, docs/log.txt.
+Verification: OK compilación de fable-agent.jar y mksa-thin.jar con 0 errores y smoke_unloaded_classes.py exitoso.
+Recovery notes: Clases no cargadas opcionales son omitidas con SKIPPED_NOT_LOADED sin fallar la operación. Excepciones sin mensaje exponen su causa raíz.
 
 ## End Active Task
 

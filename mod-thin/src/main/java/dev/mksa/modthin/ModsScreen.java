@@ -732,10 +732,11 @@ public final class ModsScreen extends class_437 {
                     busy = false;
                     bannerError = true;
                     if (r.retryable || r.rolledBack) {
-                        banner = "No se aplicó. El mod '" + ns + "' sigue activo. Puedes volver a intentarlo.";
+                        String detail = r.rootCauseMessage != null ? (" (" + r.rootCauseMessage + ")") : "";
+                        banner = "No se aplicó. El mod '" + ns + "' sigue activo." + detail + " Puedes volver a intentarlo.";
                     } else {
-                        banner = verb + " falló: "
-                                + (r.error != null ? r.error : (r.code != null ? r.code : "desconocido"));
+                        String detail = r.error != null ? r.error : (r.rootCauseMessage != null ? r.rootCauseMessage : r.code);
+                        banner = verb + " falló: " + (detail != null ? detail : "error desconocido");
                     }
                     // S14: Refrescar la lista para actualizar el estado del boton a Reintentar
                     new Thread(() -> {

@@ -114,14 +114,21 @@ public final class ToggleService {
             // Transicionar a PLANNING_DISABLE
             Tier3RuntimeState.beginDisable(namespace, operationId);
 
-            // Paso 3: descubrir targets y crear plan
+            // Paso 3: descubrir targets y crear plan (filtrado solo a targets cargados en JVM)
             Set<String> targetSet = Tier3MixinAudit.scanTargets(namespace);
             if (targetSet == null || targetSet.isEmpty()) {
-                Tier3RuntimeState.markFailedActive(namespace,
-                        "Sin targets descubiertos para " + namespace);
-                return fail("NO_TARGETS",
-                        "No hay targets mixin registrados para '" + namespace + "'",
-                        null, null);
+                // S3: Si no hay targets cargados en la JVM para este mod, no es un error fatal.
+                // El mod permanece ACTIVE y retryable.
+                Map<String, Object> reply = new LinkedHashMap<String, Object>();
+                reply.put("ok", Boolean.FALSE);
+                reply.put("namespace", namespace);
+                reply.put("state", "ACTIVE");
+                reply.put("toggleState", "active");
+                reply.put("code", "NO_LOADED_VICTIM_TARGETS");
+                reply.put("error", "No hay targets del mod cargados actualmente en la JVM");
+                reply.put("retryable", Boolean.TRUE);
+                reply.put("rolledBack", Boolean.FALSE);
+                return reply;
             }
             String[] targets = targetSet.toArray(new String[0]);
 
@@ -208,13 +215,9 @@ public final class ToggleService {
             }
         } catch (Throwable t) {
             Tier3RuntimeState.markFailedActive(namespace,
-                    t.getClass().getSimpleName() + ": " + t.getMessage());
-            Map<String, Object> reply = fail("INTERNAL",
-                    t.getClass().getSimpleName() + ": " + t.getMessage(),
-                    "disable", null);
+                    t.getClass().getSimpleName() + ": " + (t.getMessage() != null ? t.getMessage() : "no_message"));
+            Map<String, Object> reply = errorWithCause("INTERNAL_ERROR", "disable", null, t);
             reply.put("state", "failed_active");
-            reply.put("rolledBack", Boolean.TRUE);
-            reply.put("retryable", Boolean.TRUE);
             return reply;
         } finally {
             // Paso 15: liberar lock
@@ -432,6 +435,39 @@ public final class ToggleService {
     }
 
     // ---- helpers ----
+
+    public static Map<String, Object> errorWithCause(String code, String phase, String target, Throwable t) {
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("ok", Boolean.FALSE);
+        m.put("code", code != null ? code : "INTERNAL_ERROR");
+        if (phase != null) m.put("phase", phase);
+        if (target != null) m.put("target", target);
+        if (t != null) {
+            m.put("exceptionClass", t.getClass().getName());
+            String msg = t.getMessage();
+            m.put("message", (msg != null && !msg.isEmpty()) ? msg : t.getClass().getSimpleName());
+            Throwable cause = t.getCause();
+            if (cause != null) {
+                m.put("rootCauseClass", cause.getClass().getName());
+                String cMsg = cause.getMessage();
+                m.put("rootCauseMessage", (cMsg != null && !cMsg.isEmpty()) ? cMsg : cause.getClass().getSimpleName());
+            }
+            List<String> st = new ArrayList<String>();
+            StackTraceElement[] elems = t.getStackTrace();
+            if (elems != null) {
+                for (int i = 0; i < Math.min(elems.length, 5); i++) {
+                    st.add(elems[i].toString());
+                }
+            }
+            m.put("stackTrace", st);
+            m.put("error", m.get("message"));
+        } else {
+            m.put("error", "Error interno sin excepcion declarada");
+        }
+        m.put("retryable", Boolean.TRUE);
+        m.put("rolledBack", Boolean.TRUE);
+        return m;
+    }
 
     private Map<String, Object> fail(String code, String error, String phase, String target) {
         Map<String, Object> m = new LinkedHashMap<String, Object>();

@@ -1094,11 +1094,25 @@ final class Tier3MixinAudit {
         }
     }
 
-    /** Modo de aplicacion derivado en vivo para un target -- reemplaza el
-     * campo {@code replay} de la vieja TargetEntry (Tier3DemixApply, whitelist
-     * tipeada a mano). BLOCKED es nuevo: no existia en el diseño anterior
-     * (donde "no elegible" era simplemente "ausente del mapa", sin razon). */
-    public enum DemixMode { RESET, REPLAY, PRESERVE_SHAPE, BLOCKED }
+    /** S6: Modo de aplicación derivado en vivo para un target:
+     * <ul>
+     *   <li>PRESERVE_SHAPE: Conserva interfaces, campos y firmas, neutraliza métodos inyectados.</li>
+     *   <li>REPLAY: Re-aplica mixins de co-owners sobre bytes base sin el mod víctima.</li>
+     *   <li>RESET: Restaura bytes base originales (sin co-owners ni consumidores de forma).</li>
+     *   <li>ADAPTER: Cierre y restauración explícita para mods con threads, JNI o recursos nativos.</li>
+     *   <li>BLOCKED: Solo cuando se demuestre corrupción o violación de invariantes.</li>
+     * </ul>
+     */
+    public enum DemixMode { RESET, REPLAY, PRESERVE_SHAPE, ADAPTER, BLOCKED }
+
+    /** S7: Clasificación de consumidores externos para acotar auditoría. */
+    public enum ExternalConsumerClassification {
+        NO_REFERENCE,
+        REFERENCE_DIRECTA_A_LA_VICTIMA,
+        REFLECTION_RELACIONADA_CON_LA_VICTIMA,
+        REFLECTION_NO_RELACIONADA,
+        DINAMICA_NO_RESUELTA
+    }
 
     /** Resultado de clasificar un target: modo + (si BLOCKED) las razones
      * concretas, nunca solo un booleano -- mismo principio de honestidad que

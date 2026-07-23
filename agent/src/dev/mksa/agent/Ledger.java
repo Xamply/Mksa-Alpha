@@ -3279,11 +3279,9 @@ public final class Ledger implements LedgerSink {
                     e.put("icon", java.util.Base64.getEncoder().encodeToString(iconBytes));
                     iconsServed++;
                 }
-              }
+            }
               Object semantic = m.get("semantic");
               if (semantic instanceof Map) e.put("semantic", semantic);
-              // running = no veto armado para ningun namespace del mod. Si un mod
-              // declara varios, queda "off" en cuanto cualquiera este vetado.
               boolean running = true;
               if (nsList instanceof List) {
                   for (Object o : (List<?>) nsList) {
@@ -3291,17 +3289,78 @@ public final class Ledger implements LedgerSink {
                 }
             }
             e.put("running", running);
-            // Tier 1/2 siempre soportados (binomio in-process: sweep + filter +
-            // dpReload + restitucion viva). T3 corte tender-seeking-fern (tarea
-            // #35): Tier3DemixApply.disableGroup/enableGroup ya estan cableados
-            // de verdad en disableOne/enableOne -- el boton ya no debe quedar
-            // gris a priori para Tier 3. La seguridad real sigue viviendo en el
-            // gate (canLowerDecision, clasificacion RESET/REPLAY/BLOCKED en vivo):
-            // si el mod concreto no es viable, el click igual falla limpio con
-            // TIER3_DEMIX_NOT_EXECUTABLE (mismo camino de banner de error que
-            // cualquier otro fallo de runAction), nunca fingiendo soporte.
             Object tier = m.get("tier");
             e.put("supportedDisable", tier instanceof Integer && ((Integer) tier).intValue() >= 1);
+
+            // S2: capacidad real y estado dinamico por mod
+            String toggleState = running ? "active" : "inactive_verified";
+            String toggleCapability = "ready";
+            String toggleMechanism = null;
+            String toggleError = null;
+
+            if (tier instanceof Integer) {
+                int tierVal = ((Integer) tier).intValue();
+                if (tierVal >= 3) {
+                    Object modIdObj = m.get("id");
+                    if (modIdObj instanceof String) {
+                        String modId = (String) modIdObj;
+                        Tier3RuntimeState.State state = Tier3RuntimeState.getState(modId);
+                        if (state != null) {
+                            switch (state) {
+                                case ACTIVE:
+                                    toggleState = "active";
+                                    break;
+                                case INACTIVE_VERIFIED:
+                                    toggleState = "inactive_verified";
+                                    break;
+                                case DISABLING:
+                                    toggleState = "disabling";
+                                    toggleCapability = "busy";
+                                    break;
+                                case ENABLING:
+                                    toggleState = "enabling";
+                                    toggleCapability = "busy";
+                                    break;
+                                case PLANNING_DISABLE:
+                                    toggleState = "planning_disable";
+                                    toggleCapability = "analyzing";
+                                    break;
+                                case PLANNING_ENABLE:
+                                    toggleState = "planning_enable";
+                                    toggleCapability = "analyzing";
+                                    break;
+                                case ROLLING_BACK:
+                                    toggleState = "rolling_back";
+                                    toggleCapability = "busy";
+                                    break;
+                                case FAILED_ACTIVE:
+                                    toggleState = "active";
+                                    toggleCapability = "ready";
+                                    toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
+                                    break;
+                                case FAILED_INACTIVE:
+                                    toggleState = "inactive_verified";
+                                    toggleCapability = "ready";
+                                    toggleError = Tier3RuntimeState.getOrCreate(modId).getLastError();
+                                    break;
+                            }
+                        }
+                    }
+                    toggleMechanism = "tier3_demix";
+                } else if (tierVal >= 2) {
+                    toggleMechanism = "tier2_runtime";
+                } else if (tierVal >= 1) {
+                    toggleMechanism = "tier1_sweep";
+                } else {
+                    toggleMechanism = "tier0_data";
+                }
+            }
+
+            e.put("toggleState", toggleState);
+            e.put("toggleCapability", toggleCapability);
+            if (toggleMechanism != null) e.put("mechanism", toggleMechanism);
+            if (toggleError != null) e.put("toggleError", toggleError);
+
             out.add(e);
         }
         Map<String, Object> root = new HashMap<String, Object>();
@@ -3384,42 +3443,10 @@ public final class Ledger implements LedgerSink {
         try {
             Map<String, Object> mod = findModByNamespace(ns);
             Integer tier = modTier(mod);
+            // S4: Tier 3 delega al ToggleService. Sin gate canLowerDecision.
             if (tier != null && tier.intValue() >= 3) {
-                Map<String, Object> plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
-                Map<String, Object> gate = mapObj(plan.get("txGate"));
-                if (!Boolean.TRUE.equals(gate.get("canLowerDecision"))) {
-                    Map<String, Object> err = modThinErr("TIER3_DEMIX_NOT_EXECUTABLE",
-                            "Tier 3 requiere demix transaccional viable antes de ejecutar disable hot.");
-                    err.put("ns", ns);
-                    err.put("tier", tier);
-                    err.put("t3TxGate", gate);
-                    err.put("t3MixinPlan", plan);
-                    return err;
-                }
-                // T3 corte tender-seeking-fern (tarea #33): el gate ya confirmo
-                // canLowerDecision=true -- ejecuta de verdad, generalizado a
-                // CUALQUIER namespace (Tier3MixinAudit.scanTargets, no una
-                // whitelist tipeada a mano). expectedModes viaja el modo que el
-                // gate acaba de auditar; Tier3DemixApply.disableGroup lo
-                // re-verifica en vivo en el momento de aplicar (anti-TOCTOU) y
-                // aborta sin mutar nada si algo derivo entre el gate y este apply.
-                Set<String> targets = Tier3MixinAudit.scanTargets(ns);
-                if (targets.isEmpty()) {
-                    Map<String, Object> err = modThinErr("TIER3_NO_TARGETS",
-                            "El gate permitiria bajar decision, pero no se encontraron targets declarados para " + ns + ".");
-                    err.put("ns", ns);
-                    err.put("tier", tier);
-                    return err;
-                }
-                Map<String, Tier3MixinAudit.TargetClassification> classification =
-                        Tier3MixinAudit.classifyDemixTargets(ns, targets, Agent.instrumentation);
-                Map<String, String> expectedModes = new java.util.LinkedHashMap<String, String>();
-                for (Map.Entry<String, Tier3MixinAudit.TargetClassification> e : classification.entrySet()) {
-                    expectedModes.put(e.getKey(), e.getValue().mode.name());
-                }
-                Map<String, Object> r = Tier3DemixApply.disableGroup(
-                        Agent.instrumentation, targets.toArray(new String[0]), ns, expectedModes);
-                return modThinReceiptToReply(r);
+                Map<String, Object> r = ToggleService.INSTANCE.disable(ns);
+                return r;
             }
             String path = modThinRestorePath(ns);
             ensureParent(path);
@@ -3435,20 +3462,12 @@ public final class Ledger implements LedgerSink {
 
     private Map<String, Object> enableOne(String ns) {
         try {
-            // T3 corte tender-seeking-fern (tarea #33): si hay targets
-            // desactivados registrados para este namespace (DISABLED_BY_NS,
-            // poblado por disableGroup), este mod fue apagado via el camino
-            // tier3 real -- restaura ESOS targets (registro en vivo, no
-            // re-escaneado de disco, que pudo cambiar mientras estaba
-            // desactivado) via Tier3DemixApply.enableGroup. Si no hay
-            // registro, sigue el camino tier1/2 existente sin cambios.
+            // S4: Si hay records T3 desactivados, delegar al ToggleService.
             List<Tier3DemixApply.DisabledTargetRecord> t3records =
                     Tier3DemixApply.disabledRecordsForNamespace(ns);
             if (t3records != null && !t3records.isEmpty()) {
-                String[] targets = new String[t3records.size()];
-                for (int i = 0; i < t3records.size(); i++) targets[i] = t3records.get(i).target;
-                Map<String, Object> r = Tier3DemixApply.enableGroup(Agent.instrumentation, targets, ns);
-                return modThinReceiptToReply(r);
+                Map<String, Object> r = ToggleService.INSTANCE.enable(ns);
+                return r;
             }
             String path = modThinRestorePath(ns);
             if (!new File(path).isFile()) {
@@ -3904,13 +3923,11 @@ public final class Ledger implements LedgerSink {
         return true;
     }
 
-    /** tier 1/2 siempre ejecutable hoy; tier 3 depende del mismo gate que disableOne usa. */
+    /** S4: todo mod con tier >= 1 es ejecutable. La viabilidad tecnica la
+     * determina el ToggleService en el momento del click, no aqui. */
     private boolean isMemberExecutable(String ns, Map<String, Object> mod, Integer tier) {
         if (tier == null) return false;
-        if (tier.intValue() <= 2) return true;
-        Map<String, Object> plan = Tier3MixinAudit.plan(ns, mod, modRoots, Agent.instrumentation);
-        Map<String, Object> gate = mapObj(plan.get("txGate"));
-        return Boolean.TRUE.equals(gate.get("canLowerDecision"));
+        return tier.intValue() >= 1;
     }
 
     private static Map<String, Object> surface(String id, String detail) {

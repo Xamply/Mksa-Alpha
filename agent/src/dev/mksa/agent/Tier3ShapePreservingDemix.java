@@ -198,9 +198,23 @@ public final class Tier3ShapePreservingDemix {
     }
 
     private static boolean isVictimInjectedMethod(String name, String desc, Set<String> victimMixins) {
-        if (name.startsWith("chatheads$") || name.startsWith("chat_heads$")) return true;
-        // Métodos de interfaz inyectados típicos de chat_heads
-        if ("getHeadRenderable".equals(name) || "getHeadData".equals(name) || "setHeadData".equals(name)) return true;
+        if (name == null || name.isEmpty()) return false;
+        // Prefix dinamico derivado de los nombres simples de los mixins del mod victima
+        if (victimMixins != null) {
+            for (String mixinClass : victimMixins) {
+                String simpleName = mixinClass;
+                int lastDot = mixinClass.lastIndexOf('.');
+                if (lastDot >= 0) simpleName = mixinClass.substring(lastDot + 1);
+                // Patrón Mixin estándar: SimpleName$methodName o simple_name$methodName
+                if (name.startsWith(simpleName + "$")) return true;
+                if (name.startsWith(simpleName.toLowerCase() + "$")) return true;
+            }
+        }
+        // Fallback genérico para métodos que contengan un signo $ precedido por nombres de mixin conocidos
+        // o métodos getter/setter de interfaz inyectados por mixins
+        if (name.contains("$") && !name.startsWith("lambda$") && !name.startsWith("access$")) {
+            return true;
+        }
         return false;
     }
 

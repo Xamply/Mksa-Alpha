@@ -55,6 +55,8 @@ final class BridgeProxy {
                 e.toggleCapability = asString(mm.get("toggleCapability"));
                 if (e.toggleCapability == null) e.toggleCapability = "ready";
                 e.mechanism = asString(mm.get("mechanism"));
+                // S2: toggleError del agente (null si no hay error).
+                e.toggleError = asString(mm.get("toggleError"));
                 e.semantic = parseSemantic(mm.get("semantic"));
                 Object files = mm.get("files");
                 e.files = files instanceof List ? toStringList((List<Object>) files) : Collections.<String>emptyList();
@@ -307,6 +309,18 @@ final class BridgeProxy {
         r.runtimeRemoved = asLong(m.get("runtimeRemoved"));
         r.runtimeRestored = asLong(m.get("runtimeRestored"));
         r.runtimeErrors = asLong(m.get("runtimeErrors"));
+        // S12: campos enriquecidos para respuestas ricas del agente.
+        r.state = asString(m.get("state"));
+        if (r.state == null) r.state = asString(m.get("toggleState"));
+        r.verified = Boolean.TRUE.equals(m.get("verified"));
+        r.mechanism = asString(m.get("mechanism"));
+        r.rollbackAvailable = Boolean.TRUE.equals(m.get("rollbackAvailable"));
+        r.phase = asString(m.get("phase"));
+        r.target = asString(m.get("target"));
+        r.rolledBack = Boolean.TRUE.equals(m.get("rolledBack"));
+        r.targets = asLong(m.get("targets"));
+        Object metricsObj = m.get("metrics");
+        if (metricsObj instanceof Map) r.metrics = (Map<String, Object>) metricsObj;
         return r;
     }
 
@@ -373,6 +387,16 @@ final class BridgeProxy {
         long runtimeRestored;
         long runtimeErrors;
         String raw;
+        // S12: campos enriquecidos.
+        String state;              // toggle state after action (ON/OFF/etc.)
+        boolean verified;          // whether the state was verified
+        String mechanism;          // mechanism used (tier3_preserve_shape, etc.)
+        boolean rollbackAvailable; // whether rollback data is available
+        boolean rolledBack;        // whether a rollback was performed on failure
+        String phase;              // phase where error occurred (if error)
+        String target;             // target where error occurred (if error)
+        long targets;              // number of targets processed
+        Map<String, Object> metrics; // before/after metrics (nullable)
     }
 
     static final class NamedMod {
@@ -474,10 +498,11 @@ final class BridgeProxy {
         Integer tier;             // null si no clasificado
         boolean enabled;          // loader-side (siempre true; compat)
         boolean running;          // true = activo; false = desactivado in-process
-        boolean supportedDisable; // compat
-        String toggleState;       // active, inactive_verified, etc.
-        String toggleCapability;  // ready, analyzing, needs_adapter, runtime_unsupported
-        String mechanism;         // tier3_shape_preserving_demix, etc.
+        boolean supportedDisable; // compat — no se usa para decisiones de UI
+        String toggleState;       // active, inactive_verified, disabling, enabling, etc.
+        String toggleCapability;  // ready, analyzing, busy, error
+        String mechanism;         // tier3_demix, tier1_sweep, tier2_runtime, tier0_data
+        String toggleError;       // ultimo error registrado (null si no hay)
         List<String> files;       // rutas absolutas de .jar; vacio si el agente no lo expone
         String description;       // null si el mod no la declara
         SemanticProfile semantic; // perfil semantico derivado del WCG

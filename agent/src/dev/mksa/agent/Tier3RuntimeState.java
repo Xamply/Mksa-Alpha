@@ -47,6 +47,10 @@ public final class Tier3RuntimeState {
             this.timestamp = System.currentTimeMillis();
         }
 
+        public String getLastError() {
+            return lastError;
+        }
+
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<String, Object>();
             m.put("namespace", namespace);

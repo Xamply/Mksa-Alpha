@@ -167,9 +167,10 @@ public final class ModsScreen extends class_437 {
         this.method_37063(this.tierToggleBtn);
 
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        boolean isRuntimeUnsupported = sel != null && "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability);
-        boolean disableActive = !busy && sel != null && "active".equalsIgnoreCase(sel.toggleState) && !isRuntimeUnsupported;
-        boolean enableActive  = !busy && sel != null && "inactive_verified".equalsIgnoreCase(sel.toggleState) && !isRuntimeUnsupported;
+        // S1: La UI nunca decide capacidad tecnica. Solo ON + no busy = Desactivar,
+        // OFF verificado + no busy = Restaurar. Sin tier, supportedDisable, ni whitelist.
+        boolean disableActive = !busy && sel != null && "active".equalsIgnoreCase(sel.toggleState);
+        boolean enableActive  = !busy && sel != null && "inactive_verified".equalsIgnoreCase(sel.toggleState);
 
         int panelBottom = LIST_TOP + visibleRows * ROW_HEIGHT - 22;
         int actY = panelBottom + 6;
@@ -295,10 +296,20 @@ public final class ModsScreen extends class_437 {
             }
 
             // Chips a la derecha del contenido — centrados verticalmente.
+            // S14: estados ricos derivados de toggleState (no solo running).
             int chipY = y + (ROW_HEIGHT - 2 - 12) / 2;
-            int chipX = contentRight - 32;        // ON/OFF a la derecha del contenido
-            String stateLabel = e.running ? "ON" : "OFF";
-            int stateColor = e.running ? 0xFF3FAF55 : 0xFFAF553F;
+            int chipX = contentRight - 32;
+            String stateLabel;
+            int stateColor;
+            String ts = e.toggleState != null ? e.toggleState.toLowerCase(Locale.ROOT) : (e.running ? "active" : "off");
+            if ("active".equals(ts)) { stateLabel = "ON"; stateColor = 0xFF3FAF55; }
+            else if ("inactive_verified".equals(ts)) { stateLabel = "OFF \u2713"; stateColor = 0xFFAF553F; }
+            else if ("disabling".equals(ts)) { stateLabel = "APAGANDO"; stateColor = 0xFFE0E030; }
+            else if ("enabling".equals(ts)) { stateLabel = "RESTAURANDO"; stateColor = 0xFFE0E030; }
+            else if ("rolling_back".equals(ts)) { stateLabel = "ROLLBACK"; stateColor = 0xFFE09030; }
+            else if ("planning_disable".equals(ts) || "planning_enable".equals(ts)) { stateLabel = "ANALIZANDO"; stateColor = 0xFF66AAFF; }
+            else if ("failed_active".equals(ts) || "failed_inactive".equals(ts) || "error".equals(ts)) { stateLabel = "ERROR"; stateColor = 0xFFFF4040; }
+            else { stateLabel = e.running ? "ON" : "OFF"; stateColor = e.running ? 0xFF3FAF55 : 0xFFAF553F; }
             drawChip(ctx, chipX, chipY, stateLabel, stateColor);
             if (showTiers) {
                 String tierLabel = e.tier == null ? "T?" : ("T" + e.tier);
@@ -556,7 +567,8 @@ public final class ModsScreen extends class_437 {
 
     private void onDisable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        if (sel == null || busy || "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability)) return;
+        // S1: sin runtime_unsupported — la UI no decide capacidad.
+        if (sel == null || busy) return;
         if (!"active".equalsIgnoreCase(sel.toggleState)) return;
         final String ns = sel.id;
         final String name = sel.name;
@@ -580,7 +592,8 @@ public final class ModsScreen extends class_437 {
 
     private void onEnable() {
         BridgeProxy.ModEntry sel = (selected >= 0 && selected < entries.size()) ? entries.get(selected) : null;
-        if (sel == null || busy || "runtime_unsupported".equalsIgnoreCase(sel.toggleCapability)) return;
+        // S1: sin runtime_unsupported — la UI no decide capacidad.
+        if (sel == null || busy) return;
         if (!"inactive_verified".equalsIgnoreCase(sel.toggleState)) return;
         runAction(sel.id, false);
     }
